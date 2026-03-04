@@ -536,6 +536,7 @@ def handle_message(event, client, say):
         repo_full_name = "unknown"
 
         while True:
+            print(f"🔄 Calling Claude API for {agent_key} (msgs: {len(messages)})...", flush=True)
             res = claude.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048 if agent_key != "CHIEF_OF_STAFF" else 100,
@@ -544,7 +545,8 @@ def handle_message(event, client, say):
                 messages=messages,
                 timeout=120.0
             )
-            
+            print(f"✅ Claude responded: stop_reason={res.stop_reason}", flush=True)
+
             if res.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": res.content})
                 tool_results = []
