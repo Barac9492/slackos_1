@@ -402,15 +402,19 @@ def handle_message(event, client, say):
         # Agent posts in their own workspace using their own token
         selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
         
-        # 6. Global Review (Agent posts summary in #review using their own token)
-        review_msg = f"✅ *Task Completed by {selected_agent_config['name']}*\n*Channel:* {target_channel}\n*Task:* {task_summary}\n\n*Response Summary:*\n{reply[:500]}..."
-        selected_agent_client.chat_postMessage(channel=CHANNELS["REVIEW"], text=review_msg)
+        # 6. Global Review (Only for specialists)
+        if agent_key != "CHIEF_OF_STAFF":
+            review_msg = f"✅ *Task Completed by {selected_agent_config['name']}*\n*Channel:* {target_channel}\n*Task:* {task_summary}\n\n*Response Summary:*\n{reply[:500]}..."
+            selected_agent_client.chat_postMessage(channel=CHANNELS["REVIEW"], text=review_msg)
+            
     except Exception as e:
-        # Fallback to Chief of Staff if specialist post fails
-        AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
-            channel=CHANNELS["MAIN"], 
-            text=f"Specialist post failed: {e}\n\n{reply}"
-        )
+        print(f"❌ Delivery failed for {agent_key}: {e}")
+        if agent_key != "CHIEF_OF_STAFF":
+            # Post simple failure message to #ops using CoS token
+            AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
+                channel=CHANNELS["MAIN"], 
+                text=f"⚠️ {selected_agent_config['name']} unavailable. Please try again."
+            )
 
 if __name__ == "__main__":
     print("🚀 SlackOS Router is live.")
