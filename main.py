@@ -34,9 +34,13 @@ AGENTS = {
         "token": os.environ.get("SLACK_BOT_TOKEN"),
         "channel": CHANNELS["MAIN"],
         "system_prompt": (
-            "You are Chief of Staff, an AI agent working for Ethan "
-            "(CIO at TheVentures, a Seoul-based VC firm). "
-            "Your job is to coordinate tasks, break them down, and report results back. "
+            "You are a coordinator ONLY. You never do research, coding, writing, or design yourself. "
+            "You always route to the right specialist:\n"
+            "- Code, GitHub, technical → Dev Lead\n"
+            "- Research, analysis, startups → Research Lead\n"
+            "- Writing, LinkedIn, newsletter → Content Lead\n"
+            "- Deck, design, visual → Design Lead\n"
+            "You coordinate tasks, break them down, and report results back. "
             "Be concise and action-oriented."
         ),
     },
@@ -177,12 +181,15 @@ def log_api_call(client, agent_name, status="Success"):
     except: pass
 
 ROUTER_PROMPT = """
-Decide which agent key should respond. Reply with ONLY the key:
-- RESEARCH_LEAD: market/startup research, LP intel
-- DEV_LEAD: code, technical architecture, automations
+You are a router. Analyze the user task and decide which specialist should handle it.
+Reply with a JSON object: {"agent_key": "...", "task_summary": "One line summary of the task"}
+
+Keys:
+- RESEARCH_LEAD: market/startup research, analysis, deal sourcing, LP intel
+- DEV_LEAD: code, technical architecture, automations, GitHub
 - CONTENT_LEAD: LinkedIn posts, newsletter, writing
 - DESIGN_LEAD: deck structure, wireframes, visual specs
-- CHIEF_OF_STAFF: strategy, coordination, or unclear
+- CHIEF_OF_STAFF: strategy, coordination, or if it's unclear
 """
 
 app = App(token=AGENTS["CHIEF_OF_STAFF"]["token"])
@@ -191,30 +198,40 @@ app = App(token=AGENTS["CHIEF_OF_STAFF"]["token"])
 def handle_message(event, client, say):
     if event.get("subtype") == "bot_message" or event.get("bot_id"): return
     
-    # We assume messages are coming into a channel the bot is in, primarily #ops
+    # We primarily listen to #ops (CHANNELS["MAIN"])
     channel_id = event["channel"]
     text = event.get("text", "")
     if not text: return
 
     print(f"📩 Input: {text[:50]}...")
 
-    # 1. Routing
+    # 1. Routing Decision (Extract key and summary)
     try:
         route_res = claude.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=20,
+            max_tokens=150,
             system=ROUTER_PROMPT,
             messages=[{"role": "user", "content": text}]
         )
-        agent_key = route_res.content[0].text.strip().upper().rstrip(".")
+        content = route_res.content[0].text
+        data = json.loads(content[content.find("{"):content.rfind("}")+1])
+        agent_key = data.get("agent_key", "CHIEF_OF_STAFF").upper()
+        task_summary = data.get("task_summary", "Processing request")
+        
         if agent_key not in AGENTS: agent_key = "CHIEF_OF_STAFF"
-    except:
+    except Exception as e:
+        print(f"⚠️ Routing error: {e}")
         agent_key = "CHIEF_OF_STAFF"
+        task_summary = text[:50]
     
     selected = AGENTS[agent_key]
     print(f"🎯 Route: {agent_key}")
 
-    # 2. Context & Profile
+    # 2. Post Routing Notification in #ops (Always by Chief of Staff)
+    if agent_key != "CHIEF_OF_STAFF":
+        say(f"Routing to {selected['name']}. {task_summary}")
+
+    # 3. Context & Profile
     ctx = MemoryManager.get_context(agent_key)
     profile = ProfileManager.load()
     sys_prompt = (
@@ -223,7 +240,7 @@ def handle_message(event, client, say):
         f"{ctx}"
     )
 
-    # 3. Execution
+    # 4. Specialist Execution
     try:
         res = claude.messages.create(
             model="claude-sonnet-4-20250514",
@@ -237,7 +254,7 @@ def handle_message(event, client, say):
         reply = f"Error generating response: {e}"
         log_api_call(client, selected["name"], status=f"Error: {e}")
 
-    # 4. Persistence
+    # 5. Persistence
     MemoryManager.save(selected["name"], text, reply, channel_id)
     try:
         with open(MEMORY_FILE, "r") as f:
@@ -245,26 +262,29 @@ def handle_message(event, client, say):
         ProfileManager.update_profile(count)
     except: pass
 
-    # 5. Delivery
+    # 6. Delivery
     target_channel = selected["channel"]
     try:
-        # Post to the routed agent's channel using their token
+        # Specialist posts in their own workspace
         client.chat_postMessage(token=selected["token"], channel=target_channel, text=reply)
         
-        # 6. Summary Review for CHIEF_OF_STAFF reviews
-        if agent_key != "CHIEF_OF_STAFF":
-            summary = (
-                f"*New Workspace Activity*\n"
-                f"*Agent:* {selected['name']}\n"
-                f"*Task:* {text[:200]}...\n"
-                f"*Link:* [Posted in {target_channel}]"
-            )
-            client.chat_postMessage(token=AGENTS["CHIEF_OF_STAFF"]["token"], channel=CHANNELS["REVIEW"], text=summary)
+        # 7. Final Results Summarized in #review by Chief of Staff
+        review_summary = (
+            f"✅ *Task Completed by {selected['name']}*\n"
+            f"*Channel:* {target_channel}\n"
+            f"*Task:* {task_summary}\n\n"
+            f"*Response Summary:*\n{reply[:500]}..." if len(reply) > 500 else f"*Response:*\n{reply}"
+        )
+        client.chat_postMessage(token=AGENTS["CHIEF_OF_STAFF"]["token"], channel=CHANNELS["REVIEW"], text=review_summary)
             
     except Exception as e:
         print(f"❌ Delivery failed: {e}")
-        # Fallback to the original channel if specialized post fails
-        say(f"Notification: Response posted to {target_channel} (or failed: {e})\n\n{reply}")
+        say(f"Notification: Specialist response failed to post to {target_channel}: {e}\n\n{reply}")
+
+if __name__ == "__main__":
+    print("🚀 SlackOS Router is starting...")
+    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
+    handler.start()
 
 if __name__ == "__main__":
     print("🚀 SlackOS Router is starting...")
