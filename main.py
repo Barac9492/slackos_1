@@ -49,8 +49,8 @@ AGENTS = {
             "Your ONLY tasks are:\n"
             "1. Notifying the user about which agent is handling their request.\n"
             "2. Breaking down complex cross-functional requests into sub-tasks for specialists.\n"
-            "3. Reporting final status.\n\n"
-            "Strict Rule: If the user asks for code, research, writing, or design, your response must ONLY be: '🎯 Routing to [Agent]: [Summary]'. Do NOT generate any additional advice or plan unless it's a multi-agent coordination task."
+            "Strict Rule: If the user asks for code, research, writing, or design, your response must ONLY be '🎯 Routing to [Agent]'.\n"
+            "NEVER provide analysis, suggestions, or plans yourself. NEVER use more than 2 sentences."
         ),
     },
     "RESEARCH_LEAD": {
@@ -430,14 +430,14 @@ def determine_agent(text, channel_id=None):
         if affinity_agent != "CHIEF_OF_STAFF":
             return affinity_agent, f"Channel affinity ({affinity_agent})"
 
-    # STAGE 2: Keyword Match
+    # STAGE 2: Keyword Match (Hardened)
     # 1. GitHub/Technical -> DEV_LEAD
     if re.search(r"github\.com/[\w-]+/[\w-]+", text_lower) or \
-       any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug", "python", "script", "api"]):
+       any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug", "python", "script", "api", "개선"]):
         return "DEV_LEAD", "Technical/GitHub keyword"
     
     # 2. Research Keywords -> RESEARCH_LEAD
-    if any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund", "vc", "news"]):
+    if any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund", "vc", "news", "분석", "조사"]):
         return "RESEARCH_LEAD", "Market/Startup research keyword"
     
     # 3. Content Keywords -> CONTENT_LEAD
@@ -532,7 +532,7 @@ def handle_message(event, client, say):
             # Set 30s timeout for Claude API call
             res = claude.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=2048,
+                max_tokens=2048 if agent_key != "CHIEF_OF_STAFF" else 100,
                 system=sys_prompt,
                 tools=tools if tools else anthropic.NOT_GIVEN,
                 messages=messages,
@@ -638,6 +638,10 @@ def handle_message(event, client, say):
         target_channel = selected_agent_config["channel"]
         if not reply.strip():
             reply = "✅ Agent action completed (no text response)."
+            
+        # Add Identity Header to resolve multi-token display issue
+        reply = f"*[Agent: {selected_agent_config['name']}]*\n{reply}"
+
         # Agent posts in their own workspace using their own token
         selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
         
