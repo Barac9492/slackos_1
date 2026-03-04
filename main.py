@@ -636,6 +636,8 @@ def handle_message(event, client, say):
 
         # 5. Delivery
         target_channel = selected_agent_config["channel"]
+        if not reply.strip():
+            reply = "✅ Agent action completed (no text response)."
         # Agent posts in their own workspace using their own token
         selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
         
@@ -717,6 +719,8 @@ def daily_morning_briefing():
         )
         
         reply = extract_text(res.content)
+        if not reply.strip():
+            reply = "No specific updates for this morning."
         client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"🌅 *Daily Morning Briefing (Research Lead)*\n\n{reply}")
     except Exception as e:
         alert_error("RESEARCH_LEAD", f"Daily Briefing failed: {e}")
@@ -737,6 +741,8 @@ def weekly_task_coordination():
         )
         
         reply = extract_text(res.content)
+        if not reply.strip():
+            reply = "No coordination tasks defined for this week."
         client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"📅 *Weekly Team Coordination*\n\n{reply}")
     except Exception as e:
         alert_error("CHIEF_OF_STAFF", f"Weekly Coordination failed: {e}")
