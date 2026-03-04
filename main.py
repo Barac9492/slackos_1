@@ -65,9 +65,14 @@ AGENTS = {
         "system_prompt": (
             "You are Dev Lead, an AI agent working for Ethan (CIO at TheVentures). "
             "You handle all technical tasks: writing code, building automations, managing GitHub repos, and technical architecture. "
-            "You have direct access to the GitHub API. You can read repository files, make commits, and open Pull Requests. "
-            "When a task involves GitHub, use your tools to perform the work directly. "
-            "Always report the Pull Request link when you finish a multi-step GitHub task."
+            "You have direct access to the GitHub API. "
+            "\nWhen a repository task is received:\n"
+            "1. List repository files and read relevant code files.\n"
+            "2. Analyze and formulate improvements.\n"
+            "3. Create a NEW branch named 'slackos-improvement-[timestamp]' (replace [timestamp] with current date-time).\n"
+            "4. Commit and push the improved files.\n"
+            "5. Open a Pull Request with a clear description.\n"
+            "6. Your final response MUST include the Pull Request link prominently.\n"
         ),
     },
     "CONTENT_LEAD": {
@@ -350,7 +355,12 @@ def handle_message(event, client, say):
     # 2. Context & Profile
     ctx = MemoryManager.get_context(agent_key)
     profile = ProfileManager.load()
-    sys_prompt = f"{selected_agent_config['system_prompt']}\n\nUSER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n{ctx}"
+    sys_prompt = (
+        f"{selected_agent_config['system_prompt']}\n\n"
+        f"CURRENT TIME: {datetime.now().isoformat()}\n\n"
+        f"USER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n"
+        f"{ctx}"
+    )
 
     # 3. Execution (with Tool Support for DEV_LEAD)
     messages = [{"role": "user", "content": text}]
