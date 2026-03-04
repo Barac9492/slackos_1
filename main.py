@@ -5,6 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk import WebClient
 from github import Github
 
 load_dotenv()
@@ -90,6 +91,12 @@ AGENTS = {
             "You produce clear specifications that others can implement."
         ),
     },
+}
+
+# Initialize WebClients for each agent
+AGENT_CLIENTS = {
+    key: WebClient(token=data["token"]) 
+    for key, data in AGENTS.items()
 }
 
 # GitHub Tools Definition
@@ -281,10 +288,11 @@ class ProfileManager:
             except Exception as e:
                 print(f"❌ Profile update failed: {e}")
 
-def log_api_call(client, agent_name, status="Success"):
+def log_api_call(agent_name, status="Success"):
     try:
         msg = f"API Log: {agent_name} | {status} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        client.chat_postMessage(channel=CHANNELS["LOGS"], text=msg)
+        # Logs are posted by Chief of Staff
+        AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(channel=CHANNELS["LOGS"], text=msg)
     except: pass
 
 ROUTER_PROMPT = """
@@ -328,16 +336,21 @@ def handle_message(event, client, say):
         agent_key = "CHIEF_OF_STAFF"
         task_summary = text[:50]
     
-    selected = AGENTS[agent_key]
+    selected_agent_config = AGENTS[agent_key]
+    selected_agent_client = AGENT_CLIENTS[agent_key]
     print(f"🎯 Route: {agent_key}")
 
+    # Chief of Staff notifies routing in #ops
     if agent_key != "CHIEF_OF_STAFF":
-        say(f"Routing to {selected['name']}. {task_summary}")
+        AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
+            channel=CHANNELS["MAIN"], 
+            text=f"Routing to {selected_agent_config['name']}. {task_summary}"
+        )
 
     # 2. Context & Profile
     ctx = MemoryManager.get_context(agent_key)
     profile = ProfileManager.load()
-    sys_prompt = f"{selected['system_prompt']}\n\nUSER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n{ctx}"
+    sys_prompt = f"{selected_agent_config['system_prompt']}\n\nUSER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n{ctx}"
 
     # 3. Execution (with Tool Support for DEV_LEAD)
     messages = [{"role": "user", "content": text}]
@@ -370,13 +383,13 @@ def handle_message(event, client, say):
             reply = res.content[0].text
             break
             
-        log_api_call(client, selected["name"])
+        log_api_call(selected_agent_config["name"])
     except Exception as e:
         reply = f"Error: {e}"
-        log_api_call(client, selected["name"], status=f"Error: {e}")
+        log_api_call(selected_agent_config["name"], status=f"Error: {e}")
 
     # 4. Persistence
-    MemoryManager.save(selected["name"], text, reply, channel_id)
+    MemoryManager.save(selected_agent_config["name"], text, reply, channel_id)
     try:
         with open(MEMORY_FILE, "r") as f:
             count = sum(1 for _ in f)
@@ -384,15 +397,20 @@ def handle_message(event, client, say):
     except: pass
 
     # 5. Delivery
-    target_channel = selected["channel"]
+    target_channel = selected_agent_config["channel"]
     try:
-        client.chat_postMessage(token=selected["token"], channel=target_channel, text=reply)
+        # Agent posts in their own workspace using their own token
+        selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
         
-        # 6. Global Review
-        review_msg = f"✅ *Task Completed by {selected['name']}*\n*Channel:* {target_channel}\n*Task:* {task_summary}\n\n*Response Summary:*\n{reply[:500]}..."
-        client.chat_postMessage(token=AGENTS["CHIEF_OF_STAFF"]["token"], channel=CHANNELS["REVIEW"], text=review_msg)
+        # 6. Global Review (Agent posts summary in #review using their own token)
+        review_msg = f"✅ *Task Completed by {selected_agent_config['name']}*\n*Channel:* {target_channel}\n*Task:* {task_summary}\n\n*Response Summary:*\n{reply[:500]}..."
+        selected_agent_client.chat_postMessage(channel=CHANNELS["REVIEW"], text=review_msg)
     except Exception as e:
-        say(f"Speciaist post failed: {e}\n\n{reply}")
+        # Fallback to Chief of Staff if specialist post fails
+        AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
+            channel=CHANNELS["MAIN"], 
+            text=f"Specialist post failed: {e}\n\n{reply}"
+        )
 
 if __name__ == "__main__":
     print("🚀 SlackOS Router is live.")
