@@ -40,14 +40,12 @@ AGENTS = {
         "token": os.environ.get("SLACK_BOT_TOKEN"),
         "channel": CHANNELS["MAIN"],
         "system_prompt": (
-            "You are a coordinator ONLY. You never do research, coding, writing, or design yourself. "
-            "You always route to the right specialist:\n"
-            "- Code, GitHub, technical → Dev Lead\n"
-            "- Research, analysis, startups → Research Lead\n"
-            "- Writing, LinkedIn, newsletter → Content Lead\n"
-            "- Deck, design, visual → Design Lead\n"
-            "You coordinate tasks, break them down, and report results back. "
-            "Be concise and action-oriented."
+            "You are a COORDINATOR and ROUTER ONLY. Do NOT perform any technical work, research, content writing, or design yourself.\n"
+            "Your ONLY tasks are:\n"
+            "1. Notifying the user about which agent is handling their request.\n"
+            "2. Breaking down complex cross-functional requests into sub-tasks for specialists.\n"
+            "3. Reporting final status.\n\n"
+            "Strict Rule: If the user asks for code, research, writing, or design, your response must ONLY be: '🎯 Routing to [Agent]: [Summary]'. Do NOT generate any additional advice or plan unless it's a multi-agent coordination task."
         ),
     },
     "RESEARCH_LEAD": {
@@ -106,6 +104,9 @@ AGENTS = {
         ),
     },
 }
+
+# Reverse Channel Map for Affinity
+REVERSE_CHANNELS = {}
 
 # Initialize WebClients for each agent
 AGENT_CLIENTS = {
@@ -415,28 +416,60 @@ def log_api_call(agent_name, status="Success"):
         AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(channel=CHANNELS["LOGS"], text=msg)
     except: pass
 
-def determine_agent(text):
+def determine_agent(text, channel_id=None):
     text_lower = text.lower()
     
-    # 1. GitHub URL or explicit keywords -> DEV_LEAD
+    # STAGE 1: Channel Affinity
+    if channel_id and channel_id in REVERSE_CHANNELS:
+        affinity_agent = REVERSE_CHANNELS[channel_id]
+        if affinity_agent != "CHIEF_OF_STAFF":
+            return affinity_agent, f"Channel affinity ({affinity_agent})"
+
+    # STAGE 2: Keyword Match
+    # 1. GitHub/Technical -> DEV_LEAD
     if re.search(r"github\.com/[\w-]+/[\w-]+", text_lower) or \
-       any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug"]):
-        return "DEV_LEAD", "Technical/GitHub task"
+       any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug", "python", "script", "api"]):
+        return "DEV_LEAD", "Technical/GitHub keyword"
     
     # 2. Research Keywords -> RESEARCH_LEAD
-    if any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund"]):
-        return "RESEARCH_LEAD", "Market/Startup research"
+    if any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund", "vc", "news"]):
+        return "RESEARCH_LEAD", "Market/Startup research keyword"
     
     # 3. Content Keywords -> CONTENT_LEAD
-    if any(k in text_lower for k in ["write", "post", "linkedin", "newsletter", "content", "draft"]):
-        return "CONTENT_LEAD", "Content/Writing task"
+    if any(k in text_lower for k in ["write", "post", "linkedin", "newsletter", "content", "draft", "article"]):
+        return "CONTENT_LEAD", "Content/Writing keyword"
     
     # 4. Design Keywords -> DESIGN_LEAD
-    if any(k in text_lower for k in ["deck", "design", "slide", "visual", "ui", "ux"]):
-        return "DESIGN_LEAD", "Design/Visual task"
+    if any(k in text_lower for k in ["deck", "design", "slide", "visual", "ui", "ux", "wireframe", "ppt"]):
+        return "DESIGN_LEAD", "Design/Visual keyword"
+    
+    # STAGE 3: LLM Guard (if Stage 2 defaults to CoS)
+    print("🧠 Routing Guard: Consulting Claude for decision...")
+    prompt = (
+        "Decide which specialist agent should handle this message.\n"
+        "Options: DEV_LEAD, RESEARCH_LEAD, CONTENT_LEAD, DESIGN_LEAD, CHIEF_OF_STAFF\n"
+        "- DEV_LEAD: Technical, code, GitHub, automations\n"
+        "- RESEARCH_LEAD: Market research, startup analysis, scouting\n"
+        "- CONTENT_LEAD: Writing, LinkedIn, newsletters\n"
+        "- DESIGN_LEAD: Decks, UI/UX, visuals\n"
+        "- CHIEF_OF_STAFF: Only if it's general greeting or pure management\n\n"
+        f"Message: {text}\n\n"
+        "Return ONLY the agent key (e.g. DEV_LEAD)."
+    )
+    try:
+        res = claude.messages.create(
+            model="claude-3-haiku-20240307", # Use fast model for routing
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        decision = res.content[0].text.strip().upper()
+        if decision in AGENTS:
+            return decision, f"LLM Guard decision ({decision})"
+    except Exception as e:
+        print(f"❌ Routing Guard failed: {e}")
     
     # Default
-    return "CHIEF_OF_STAFF", "Coordination/General task"
+    return "CHIEF_OF_STAFF", "Default to Coordination"
 
 app = App(token=AGENTS["CHIEF_OF_STAFF"]["token"])
 
@@ -452,7 +485,8 @@ def handle_message(event, client, say):
         print(f"📩 Input: {text[:50]}...")
 
         # 1. Hard-coded Routing Decision
-        agent_key, task_summary = determine_agent(text)
+        # 1. Determine Agent (with hardened routing)
+        agent_key, task_summary = determine_agent(text, channel_id)
         
         selected_agent_config = AGENTS[agent_key]
         selected_agent_client = AGENT_CLIENTS[agent_key]
@@ -626,6 +660,10 @@ def join_channels():
                 for channel in response["channels"]:
                     if channel["name"] == clean_name:
                         channel_cache[name] = channel["id"]
+                        # Populate Reverse Map
+                        for agent_key, data in AGENTS.items():
+                            if data["channel"] == name:
+                                REVERSE_CHANNELS[channel["id"]] = agent_key
                         return channel["id"]
                 cursor = response.get("response_metadata", {}).get("next_cursor")
                 if not cursor: break
