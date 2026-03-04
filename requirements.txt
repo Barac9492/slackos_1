@@ -1,6 +1,6 @@
 slack-bolt==1.21.3
 slack-sdk==3.33.5
-anthropic==0.42.0
+anthropic>=0.49.0
 PyGithub==2.1.1
 apscheduler==3.11.0
 pytz==2024.1

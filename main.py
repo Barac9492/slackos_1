@@ -177,30 +177,30 @@ GITHUB_TOOLS = [
             "required": ["repo_full_name", "title", "body", "head"]
         }
     },
-    {
-        "name": "web_search",
-        "description": "Perform a web search to gather real-time startup and market data.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The search query."}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "save_to_obsidian",
-        "description": "Save content as a markdown file in the Obsidian vault directory.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filename": {"type": "string", "description": "The name of the file (e.g. 'post_v1.md')."},
-                "content": {"type": "string", "description": "The markdown content to save."}
-            },
-            "required": ["filename", "content"]
-        }
-    }
 ]
+
+# Save-to-Obsidian tool definition (used by Content Lead)
+SAVE_TO_OBSIDIAN_TOOL = {
+    "name": "save_to_obsidian",
+    "description": "Save content as a markdown file in the Obsidian vault directory.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "The name of the file (e.g. 'post_v1.md')."},
+            "content": {"type": "string", "description": "The markdown content to save."}
+        },
+        "required": ["filename", "content"]
+    }
+}
+
+# Claude API server-side web search tool
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+
+# Read-only GitHub tools for Research Lead
+RESEARCH_TOOLS = [t for t in GITHUB_TOOLS if t["name"] in ("list_repository_files", "get_file_content")]
+
+# Content Lead tools: save_to_obsidian only (web search added server-side)
+CONTENT_TOOLS = [SAVE_TO_OBSIDIAN_TOOL]
 
 def alert_error(agent_name, error_msg, channel_id=None):
     """Logs error to #ops-logs and alerts Ethan in #review."""
@@ -245,7 +245,8 @@ def execute_github_tool(name, input_data):
                         elif item.type == "dir":
                             print(f"📁 GitHub: entering directory {item.path}...")
                             found_files.extend(get_recursive_files(item.path, current_depth + 1))
-                except: pass
+                except Exception:
+                    pass
                 return found_files
 
             contents = repo.get_contents(input_data["path"])
@@ -265,20 +266,20 @@ def execute_github_tool(name, input_data):
             # Create branch if it doesn't exist
             try:
                 repo.get_branch(input_data["branch_name"])
-            except:
+            except Exception:
                 repo.create_git_ref(ref=f"refs/heads/{input_data['branch_name']}", sha=base_branch.commit.sha)
             
             for change in input_data["file_changes"]:
                 try:
                     contents = repo.get_contents(change["path"], ref=input_data["branch_name"])
                     repo.update_file(change["path"], input_data["commit_message"], change["content"], contents.sha, branch=input_data["branch_name"])
-                except:
+                except Exception:
                     repo.create_file(change["path"], input_data["commit_message"], change["content"], branch=input_data["branch_name"])
             return f"Successfully committed changes to {input_data['branch_name']}"
         
         elif name == "create_pull_request":
             repo = github_client.get_repo(input_data["repo_full_name"])
-            pr = repo.create_pull(title=input_data["title"], body=input_data["body"], head=input_data.get("base", "main"), base=input_data.get("base", "main"))
+            pr = repo.create_pull(title=input_data["title"], body=input_data["body"], head=input_data["head"], base=input_data.get("base", "main"))
             print(f"🔗 PR created: {pr.html_url}")
             return {"pr_url": pr.html_url, "number": pr.number}
             
@@ -300,23 +301,6 @@ def execute_storage_tool(name, input_data):
         print(f"❌ Storage Error: {str(e)}")
         return f"Error executing storage tool {name}: {str(e)}"
 
-def execute_search_tool(name, input_data):
-    try:
-        if name == "web_search":
-            query = input_data["query"]
-            print(f"🔍 Web Search: {query}...")
-            # If PERPLEXITY_API_KEY is in env, we could implement it.
-            # For now, we'll return a simulated robust response to keep the flow moving,
-            # but mention it's simulated if no key is found.
-            key = os.environ.get("PERPLEXITY_API_KEY")
-            if not key:
-                return f"Simulated search results for '{query}': Recent trends show Korean AI startups are pivoting towards B2B SaaS and LP-driven funding models."
-            
-            # Simulated API call to Perplexity (placeholder)
-            return f"Perplexity results for '{query}': [Simulated Data] High growth in Korean LLM optimization startups."
-    except Exception as e:
-        print(f"❌ Search Error: {str(e)}")
-        return f"Error executing search tool {name}: {str(e)}"
 
 class MemoryManager:
     @staticmethod
@@ -340,7 +324,7 @@ class MemoryManager:
         with open(MEMORY_FILE, "r") as f:
             for line in f:
                 try: memories.append(json.loads(line))
-                except: continue
+                except (json.JSONDecodeError, ValueError): continue
         
         agent_name = AGENTS.get(agent_key, {}).get("name", agent_key)
         relevant = [m for m in memories if m["agent"] == agent_name or m["agent"] == "Chief of Staff"]
@@ -366,7 +350,7 @@ class ProfileManager:
             }
         with open(PROFILE_FILE, "r") as f:
             try: return json.load(f)
-            except: return {}
+            except (json.JSONDecodeError, ValueError): return {}
 
     @staticmethod
     def save(profile):
@@ -412,7 +396,8 @@ def log_api_call(agent_name, status="Success"):
         msg = f"API Log: {agent_name} | {status} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         # Logs are posted by Chief of Staff
         AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(channel=CHANNELS["LOGS"], text=msg)
-    except: pass
+    except Exception:
+        pass
 
 def determine_agent(text, channel_id=None):
     text_lower = text.lower()
@@ -504,7 +489,8 @@ def handle_message(event, client, say):
         try:
             with open(os.path.join(DATA_DIR, "routing_debug.txt"), "a") as f:
                 f.write(f"[{datetime.now().isoformat()}] CH:{channel_id} | AGENT:{agent_key} | MSG:{text[:50]}...\n")
-        except: pass
+        except OSError:
+            pass
 
         selected_agent_config = AGENTS[agent_key]
         selected_agent_client = AGENT_CLIENTS[agent_key]
@@ -529,11 +515,19 @@ def handle_message(event, client, say):
 
         # 3. Execution (with Tool Support)
         messages = [{"role": "user", "content": text}]
-        tools = []
-        if agent_key == "DEV_LEAD": tools = GITHUB_TOOLS
-        elif agent_key == "RESEARCH_LEAD": tools = GITHUB_TOOLS
-        elif agent_key == "CONTENT_LEAD": tools = GITHUB_TOOLS
-        
+        client_tools = []
+        server_tools = []
+        if agent_key == "DEV_LEAD":
+            client_tools = GITHUB_TOOLS
+        elif agent_key == "RESEARCH_LEAD":
+            client_tools = RESEARCH_TOOLS
+            server_tools = [WEB_SEARCH_TOOL]
+        elif agent_key == "CONTENT_LEAD":
+            client_tools = CONTENT_TOOLS
+            server_tools = [WEB_SEARCH_TOOL]
+
+        all_tools = client_tools + server_tools
+
         # Track files read for optimization
         files_read_count = 0
         last_read_paths = []
@@ -542,14 +536,13 @@ def handle_message(event, client, say):
         repo_full_name = "unknown"
 
         while True:
-            # Set 30s timeout for Claude API call
             res = claude.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048 if agent_key != "CHIEF_OF_STAFF" else 100,
                 system=sys_prompt,
-                tools=tools if tools else anthropic.NOT_GIVEN,
+                tools=all_tools if all_tools else anthropic.NOT_GIVEN,
                 messages=messages,
-                timeout=30.0
+                timeout=120.0
             )
             
             if res.stop_reason == "tool_use":
@@ -578,8 +571,6 @@ def handle_message(event, client, say):
                         else:
                             if content_block.name == "save_to_obsidian":
                                 result = execute_storage_tool(content_block.name, content_block.input)
-                            elif content_block.name == "web_search":
-                                result = execute_search_tool(content_block.name, content_block.input)
                             else:
                                 result = execute_github_tool(content_block.name, content_block.input)
                         
@@ -600,7 +591,13 @@ def handle_message(event, client, say):
                             "content": "Limit of 3 files reached. Based on the files you've read, please provide the improved code now. Formatting: ```python:path/to/file.py\n[code]\n```"
                         })
                 continue
-            
+
+            # Server-side web search: Claude pauses mid-turn to deliver results
+            if res.stop_reason == "pause_turn":
+                messages.append({"role": "assistant", "content": res.content})
+                messages.append({"role": "user", "content": "Continue."})
+                continue
+
             reply = extract_text(res.content)
             
             # Post-processing for DEV_LEAD GitHub Automation
@@ -655,7 +652,8 @@ def handle_message(event, client, say):
             with open(MEMORY_FILE, "r") as f:
                 count = sum(1 for _ in f)
             ProfileManager.update_profile(count)
-        except: pass
+        except Exception:
+            pass
 
         # 5. Delivery
         target_channel = selected_agent_config["channel"]
@@ -677,6 +675,7 @@ def handle_message(event, client, say):
     except Exception as e:
         alert_error(agent_key if 'agent_key' in locals() else "Unknown", str(e), channel_id)
         print(f"❌ handle_message failed: {e}")
+        sys.stdout.flush()
 
 def join_channels():
     print("\nâï¸ Starting Automated Channel Joining...")
@@ -753,21 +752,31 @@ def daily_morning_briefing():
     except Exception as e:
         alert_error("RESEARCH_LEAD", f"Daily Briefing failed: {e}")
 
+WEEKLY_PLANNING_PROMPT = (
+    "You are the Chief of Staff for Ethan's AI team at TheVentures. "
+    "Generate a weekly task plan for the team. Assign concrete, actionable tasks to each agent:\n"
+    "- Research Lead: deal sourcing, market scans, LP intelligence\n"
+    "- Dev Lead: GitHub automations, code improvements, infra\n"
+    "- Content Lead: LinkedIn posts, newsletter drafts, GEO optimization\n"
+    "- Design Lead: deck specs, wireframes, visual assets\n\n"
+    "Format as a structured weekly plan with priorities (P0/P1/P2) per agent. "
+    "Be specific — reference real recurring workflows like founder radar, morning briefings, and content pipeline."
+)
+
 def weekly_task_coordination():
     print("⏰ Executing Weekly Task Coordination (Chief of Staff)...")
     try:
-        agent_config = AGENTS["CHIEF_OF_STAFF"]
         client = AGENT_CLIENTS["CHIEF_OF_STAFF"]
-        
-        prompt = "이번 주 Ethan을 위해 우리 AI 팀이 집중해야 할 주간 태스크를 생성하고 각 전문 에이전트(Dev, Research, Content, Design)에게 배분해줘. 결과는 주간 계획표 형식으로 #review에 공유해."
-        
+
+        prompt = "이번 주 Ethan을 위해 우리 AI 팀이 집중해야 할 주간 태스크를 생성하고 각 전문 에이전트(Dev, Research, Content, Design)에게 배분해줘. 결과는 주간 계획표 형식으로."
+
         res = claude.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1500,
-            system=agent_config["system_prompt"],
+            system=WEEKLY_PLANNING_PROMPT,
             messages=[{"role": "user", "content": prompt}]
         )
-        
+
         reply = extract_text(res.content)
         if not reply.strip():
             reply = "No coordination tasks defined for this week."
@@ -776,9 +785,53 @@ def weekly_task_coordination():
         alert_error("CHIEF_OF_STAFF", f"Weekly Coordination failed: {e}")
 
 def founder_radar():
-    """Placeholder for Phase 3.4 Founder Radar."""
+    """Scan for Korean-diaspora founders in recent YC batches and notable accelerators."""
     print("⏰ Executing Founder Radar (Research Lead)...")
-    pass
+    try:
+        client = AGENT_CLIENTS["RESEARCH_LEAD"]
+        agent_config = AGENTS["RESEARCH_LEAD"]
+
+        prompt = (
+            "Search for recently funded Korean and Korean-diaspora founders. Focus on:\n"
+            "1. Recent Y Combinator batches (last 6 months)\n"
+            "2. Notable Korean-founded startups that raised seed or Series A\n"
+            "3. Korean AI/tech founders in the US, Europe, or Southeast Asia\n\n"
+            "For each founder found, provide:\n"
+            "- Name, company, one-line description\n"
+            "- Funding stage and amount (if available)\n"
+            "- Why they're relevant to TheVentures\n"
+            "- Confidence score (High/Medium/Low) based on data quality\n\n"
+            "Format as a structured briefing. Only include founders with real, verifiable data."
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+
+        # Loop to handle pause_turn from server-side web search
+        while True:
+            res = claude.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2048,
+                system=agent_config["system_prompt"],
+                tools=[WEB_SEARCH_TOOL],
+                messages=messages,
+                timeout=60.0
+            )
+
+            if res.stop_reason == "pause_turn":
+                messages.append({"role": "assistant", "content": res.content})
+                messages.append({"role": "user", "content": "Continue."})
+                continue
+            break
+
+        reply = extract_text(res.content)
+        if not reply.strip():
+            reply = "No founder radar results this cycle."
+        client.chat_postMessage(
+            channel=CHANNELS["REVIEW"],
+            text=f"🎯 *Founder Radar Briefing (Research Lead)*\n\n{reply}"
+        )
+    except Exception as e:
+        alert_error("RESEARCH_LEAD", f"Founder Radar failed: {e}")
 
 scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
 scheduler.add_job(daily_morning_briefing, 'cron', hour=7, minute=0)
@@ -787,5 +840,6 @@ scheduler.add_job(founder_radar, 'interval', hours=12)
 
 if __name__ == "__main__":
     join_channels()
+    scheduler.start()
     print("ð SlackOS Router is live.")
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
