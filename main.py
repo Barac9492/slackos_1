@@ -539,7 +539,7 @@ def handle_message(event, client, say):
             print(f"🔄 Calling Claude API for {agent_key} (msgs: {len(messages)})...", flush=True)
             res = claude.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=4096 if agent_key == "DEV_LEAD" else (2048 if agent_key != "CHIEF_OF_STAFF" else 100),
+                max_tokens=8192 if agent_key == "DEV_LEAD" else (2048 if agent_key != "CHIEF_OF_STAFF" else 100),
                 system=sys_prompt,
                 tools=all_tools if all_tools else anthropic.NOT_GIVEN,
                 messages=messages,
