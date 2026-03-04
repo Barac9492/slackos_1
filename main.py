@@ -420,6 +420,56 @@ def handle_message(event, client, say):
     except Exception as e:
         print(f"❌ Delivery failed for {agent_key}: {e}")
 
+def join_channels():
+    print("\nâï¸ Starting Automated Channel Joining...")
+    
+    # Simple name-to-ID cache for the session
+    channel_cache = {}
+
+    def get_channel_id(client, name):
+        if name in channel_cache: return channel_cache[name]
+        try:
+            # Note: conversations_list requires public_channels scope
+            clean_name = name.lstrip("#")
+            cursor = None
+            while True:
+                response = client.conversations_list(types="public_channel", cursor=cursor, limit=1000)
+                for channel in response["channels"]:
+                    if channel["name"] == clean_name:
+                        channel_cache[name] = channel["id"]
+                        return channel["id"]
+                cursor = response.get("response_metadata", {}).get("next_cursor")
+                if not cursor: break
+        except Exception as e:
+            print(f"â Failed to find channel {name}: {e}")
+        return None
+
+    # Define required channels per agent
+    JOIN_MAP = {
+        "CHIEF_OF_STAFF": [CHANNELS["MAIN"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
+        "RESEARCH_LEAD": [CHANNELS["RESEARCH"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
+        "DEV_LEAD": [CHANNELS["DEV"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
+        "CONTENT_LEAD": [CHANNELS["CONTENT"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
+        "DESIGN_LEAD": [CHANNELS["DESIGN"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
+    }
+
+    for agent_key, channels in JOIN_MAP.items():
+        client = AGENT_CLIENTS[agent_key]
+        agent_name = AGENTS[agent_key]["name"]
+        
+        for ch_name in channels:
+            ch_id = get_channel_id(client, ch_name)
+            if ch_id:
+                try:
+                    client.conversations_join(channel=ch_id)
+                    print(f"â {agent_name} joined {ch_name}")
+                except Exception as e:
+                    print(f"â {agent_name} failed to join {ch_name}: {e}")
+            else:
+                print(f"â ï¸ Could not resolve ID for {ch_name}")
+    print("â Startup joining routine complete.\n")
+
 if __name__ == "__main__":
-    print("🚀 SlackOS Router is live.")
+    join_channels()
+    print("ð SlackOS Router is live.")
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
