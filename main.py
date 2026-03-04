@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import anthropic
 from datetime import datetime
@@ -66,13 +67,16 @@ AGENTS = {
             "You are Dev Lead, an AI agent working for Ethan (CIO at TheVentures). "
             "You handle all technical tasks: writing code, building automations, managing GitHub repos, and technical architecture. "
             "You have direct access to the GitHub API. "
-            "\nWhen a repository task is received:\n"
-            "1. List repository files and read relevant code files.\n"
-            "2. Analyze and formulate improvements.\n"
-            "3. Create a NEW branch named 'slackos-improvement-[timestamp]' (replace [timestamp] with current date-time).\n"
-            "4. Commit and push the improved files.\n"
-            "5. Open a Pull Request with a clear description.\n"
-            "6. Your final response MUST include the Pull Request link prominently.\n"
+            "\nWhen a repository URL or task is received:\n"
+            "1. Extract the repository name (owner/repo) from the URL if provided.\n"
+            "2. List repository files and read content of ALL Python files (*.py) for analysis.\n"
+            "3. Formulate and implement code improvements directly.\n"
+            "4. Create a NEW branch named 'slackos-fix-[timestamp]' (replace [timestamp] with current date-time).\n"
+            "5. Commit and push the improved files.\n"
+            "6. Open a Pull Request with:\n"
+            "   - Title: 'SlackOS: Code improvements'\n"
+            "   - Description: Detailed summary of changes made.\n"
+            "7. Your final response MUST include the Pull Request link prominently.\n"
         ),
     },
     "CONTENT_LEAD": {
@@ -172,18 +176,22 @@ GITHUB_TOOLS = [
 ]
 
 def execute_github_tool(name, input_data):
+    repo_name = input_data.get("repo_full_name", "unknown repo")
     try:
         if name == "list_repository_files":
+            print(f"🔧 GitHub: accessing {repo_name} (listing files)...")
             repo = github_client.get_repo(input_data["repo_full_name"])
             contents = repo.get_contents(input_data.get("path", ""))
             return [c.path for c in contents]
         
         elif name == "get_file_content":
+            print(f"🔧 GitHub: accessing {repo_name} (reading {input_data['path']})...")
             repo = github_client.get_repo(input_data["repo_full_name"])
             file_content = repo.get_contents(input_data["path"])
             return file_content.decoded_content.decode("utf-8")
         
         elif name == "create_or_update_files":
+            print(f"🔧 GitHub: accessing {repo_name} (committing changes to {input_data['branch_name']})...")
             repo = github_client.get_repo(input_data["repo_full_name"])
             base_branch = repo.get_branch("main")
             
@@ -202,11 +210,13 @@ def execute_github_tool(name, input_data):
             return f"Successfully committed changes to {input_data['branch_name']}"
         
         elif name == "create_pull_request":
+            print(f"🔧 GitHub: accessing {repo_name} (creating PR: {input_data['title']})...")
             repo = github_client.get_repo(input_data["repo_full_name"])
             pr = repo.create_pull(title=input_data["title"], body=input_data["body"], head=input_data["head"], base=input_data.get("base", "main"))
             return {"pr_url": pr.html_url, "number": pr.number}
             
     except Exception as e:
+        print(f"❌ GitHub Error for {repo_name}: {str(e)}")
         return f"Error executing tool {name}: {str(e)}"
 
 class MemoryManager:
