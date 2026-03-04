@@ -5,10 +5,12 @@ from datetime import datetime
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from github import Github
 
 load_dotenv()
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+github_client = Github(os.environ.get("GITHUB_TOKEN"))
 
 # Persistence Configuration
 DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
@@ -62,7 +64,9 @@ AGENTS = {
         "system_prompt": (
             "You are Dev Lead, an AI agent working for Ethan (CIO at TheVentures). "
             "You handle all technical tasks: writing code, building automations, managing GitHub repos, and technical architecture. "
-            "You use Claude Code and implement solutions directly."
+            "You have direct access to the GitHub API. You can read repository files, make commits, and open Pull Requests. "
+            "When a task involves GitHub, use your tools to perform the work directly. "
+            "Always report the Pull Request link when you finish a multi-step GitHub task."
         ),
     },
     "CONTENT_LEAD": {
@@ -87,6 +91,111 @@ AGENTS = {
         ),
     },
 }
+
+# GitHub Tools Definition
+GITHUB_TOOLS = [
+    {
+        "name": "list_repository_files",
+        "description": "List files and directories in a GitHub repository.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_full_name": {"type": "string", "description": "The full name of the repo (e.g., 'owner/repo')."},
+                "path": {"type": "string", "description": "The path within the repo.", "default": ""}
+            },
+            "required": ["repo_full_name"]
+        }
+    },
+    {
+        "name": "get_file_content",
+        "description": "Get the content of a file from a GitHub repository.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_full_name": {"type": "string", "description": "The full name of the repo (e.g., 'owner/repo')."},
+                "path": {"type": "string", "description": "The path to the file."}
+            },
+            "required": ["repo_full_name", "path"]
+        }
+    },
+    {
+        "name": "create_or_update_files",
+        "description": "Commit one or more file changes to a branch and push to GitHub.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_full_name": {"type": "string", "description": "The full name of the repo."},
+                "branch_name": {"type": "string", "description": "The branch to commit to."},
+                "commit_message": {"type": "string", "description": "The commit message."},
+                "file_changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"}
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            },
+            "required": ["repo_full_name", "branch_name", "commit_message", "file_changes"]
+        }
+    },
+    {
+        "name": "create_pull_request",
+        "description": "Create a Pull Request on GitHub.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_full_name": {"type": "string", "description": "The full name of the repo."},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "head": {"type": "string", "description": "The name of the branch where your changes are implemented."},
+                "base": {"type": "string", "description": "The name of the branch you want the changes pulled into (e.g., 'main').", "default": "main"}
+            },
+            "required": ["repo_full_name", "title", "body", "head"]
+        }
+    }
+]
+
+def execute_github_tool(name, input_data):
+    try:
+        if name == "list_repository_files":
+            repo = github_client.get_repo(input_data["repo_full_name"])
+            contents = repo.get_contents(input_data.get("path", ""))
+            return [c.path for c in contents]
+        
+        elif name == "get_file_content":
+            repo = github_client.get_repo(input_data["repo_full_name"])
+            file_content = repo.get_contents(input_data["path"])
+            return file_content.decoded_content.decode("utf-8")
+        
+        elif name == "create_or_update_files":
+            repo = github_client.get_repo(input_data["repo_full_name"])
+            base_branch = repo.get_branch("main")
+            
+            # Create branch if it doesn't exist
+            try:
+                repo.get_branch(input_data["branch_name"])
+            except:
+                repo.create_git_ref(ref=f"refs/heads/{input_data['branch_name']}", sha=base_branch.commit.sha)
+            
+            for change in input_data["file_changes"]:
+                try:
+                    contents = repo.get_contents(change["path"], ref=input_data["branch_name"])
+                    repo.update_file(change["path"], input_data["commit_message"], change["content"], contents.sha, branch=input_data["branch_name"])
+                except:
+                    repo.create_file(change["path"], input_data["commit_message"], change["content"], branch=input_data["branch_name"])
+            return f"Successfully committed changes to {input_data['branch_name']}"
+        
+        elif name == "create_pull_request":
+            repo = github_client.get_repo(input_data["repo_full_name"])
+            pr = repo.create_pull(title=input_data["title"], body=input_data["body"], head=input_data["head"], base=input_data.get("base", "main"))
+            return {"pr_url": pr.html_url, "number": pr.number}
+            
+    except Exception as e:
+        return f"Error executing tool {name}: {str(e)}"
 
 class MemoryManager:
     @staticmethod
@@ -113,7 +222,6 @@ class MemoryManager:
                 except: continue
         
         agent_name = AGENTS.get(agent_key, {}).get("name", agent_key)
-        # Filter for relevant memories (same agent or CoS)
         relevant = [m for m in memories if m["agent"] == agent_name or m["agent"] == "Chief of Staff"]
         context = relevant[-limit:]
         
@@ -157,8 +265,7 @@ class ProfileManager:
                 f"Analyze these 10 interactions and update the user profile.\n"
                 f"Current profile: {json.dumps(curr)}\n"
                 f"Recent interactions: {json.dumps(recent)}\n"
-                "Return the FULL updated JSON profile including style_preferences, recurring_topics, "
-                "decision_patterns, liked_responses, and disliked_responses. Reply ONLY with JSON."
+                "Return the FULL updated JSON profile. Reply ONLY with JSON."
             )
             
             try:
@@ -198,14 +305,13 @@ app = App(token=AGENTS["CHIEF_OF_STAFF"]["token"])
 def handle_message(event, client, say):
     if event.get("subtype") == "bot_message" or event.get("bot_id"): return
     
-    # We primarily listen to #ops (CHANNELS["MAIN"])
     channel_id = event["channel"]
     text = event.get("text", "")
     if not text: return
 
     print(f"📩 Input: {text[:50]}...")
 
-    # 1. Routing Decision (Extract key and summary)
+    # 1. Routing Decision
     try:
         route_res = claude.messages.create(
             model="claude-sonnet-4-20250514",
@@ -217,44 +323,59 @@ def handle_message(event, client, say):
         data = json.loads(content[content.find("{"):content.rfind("}")+1])
         agent_key = data.get("agent_key", "CHIEF_OF_STAFF").upper()
         task_summary = data.get("task_summary", "Processing request")
-        
         if agent_key not in AGENTS: agent_key = "CHIEF_OF_STAFF"
-    except Exception as e:
-        print(f"⚠️ Routing error: {e}")
+    except:
         agent_key = "CHIEF_OF_STAFF"
         task_summary = text[:50]
     
     selected = AGENTS[agent_key]
     print(f"🎯 Route: {agent_key}")
 
-    # 2. Post Routing Notification in #ops (Always by Chief of Staff)
     if agent_key != "CHIEF_OF_STAFF":
         say(f"Routing to {selected['name']}. {task_summary}")
 
-    # 3. Context & Profile
+    # 2. Context & Profile
     ctx = MemoryManager.get_context(agent_key)
     profile = ProfileManager.load()
-    sys_prompt = (
-        f"{selected['system_prompt']}\n\n"
-        f"USER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n"
-        f"{ctx}"
-    )
+    sys_prompt = f"{selected['system_prompt']}\n\nUSER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n{ctx}"
 
-    # 4. Specialist Execution
+    # 3. Execution (with Tool Support for DEV_LEAD)
+    messages = [{"role": "user", "content": text}]
+    tools = GITHUB_TOOLS if agent_key == "DEV_LEAD" else []
+    
     try:
-        res = claude.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            system=sys_prompt,
-            messages=[{"role": "user", "content": text}]
-        )
-        reply = res.content[0].text
+        while True:
+            res = claude.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2048,
+                system=sys_prompt,
+                tools=tools if tools else anthropic.NOT_GIVEN,
+                messages=messages
+            )
+            
+            if res.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": res.content})
+                tool_results = []
+                for content_block in res.content:
+                    if content_block.type == "tool_use":
+                        result = execute_github_tool(content_block.name, content_block.input)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": content_block.id,
+                            "content": json.dumps(result)
+                        })
+                messages.append({"role": "user", "content": tool_results})
+                continue
+            
+            reply = res.content[0].text
+            break
+            
         log_api_call(client, selected["name"])
     except Exception as e:
-        reply = f"Error generating response: {e}"
+        reply = f"Error: {e}"
         log_api_call(client, selected["name"], status=f"Error: {e}")
 
-    # 5. Persistence
+    # 4. Persistence
     MemoryManager.save(selected["name"], text, reply, channel_id)
     try:
         with open(MEMORY_FILE, "r") as f:
@@ -262,26 +383,17 @@ def handle_message(event, client, say):
         ProfileManager.update_profile(count)
     except: pass
 
-    # 6. Delivery
+    # 5. Delivery
     target_channel = selected["channel"]
     try:
-        # Specialist posts in their own workspace
         client.chat_postMessage(token=selected["token"], channel=target_channel, text=reply)
         
-        # 7. Final Results Summarized in #review by Chief of Staff
-        review_summary = (
-            f"✅ *Task Completed by {selected['name']}*\n"
-            f"*Channel:* {target_channel}\n"
-            f"*Task:* {task_summary}\n\n"
-            f"*Response Summary:*\n{reply[:500]}..." if len(reply) > 500 else f"*Response:*\n{reply}"
-        )
-        client.chat_postMessage(token=AGENTS["CHIEF_OF_STAFF"]["token"], channel=CHANNELS["REVIEW"], text=review_summary)
-            
+        # 6. Global Review
+        review_msg = f"✅ *Task Completed by {selected['name']}*\n*Channel:* {target_channel}\n*Task:* {task_summary}\n\n*Response Summary:*\n{reply[:500]}..."
+        client.chat_postMessage(token=AGENTS["CHIEF_OF_STAFF"]["token"], channel=CHANNELS["REVIEW"], text=review_msg)
     except Exception as e:
-        print(f"❌ Delivery failed: {e}")
-        say(f"Notification: Specialist response failed to post to {target_channel}: {e}\n\n{reply}")
+        say(f"Speciaist post failed: {e}\n\n{reply}")
 
 if __name__ == "__main__":
-    print("🚀 SlackOS Router is starting...")
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
+    print("🚀 SlackOS Router is live.")
+    SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
