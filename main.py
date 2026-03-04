@@ -187,11 +187,22 @@ def execute_github_tool(name, input_data):
         elif name == "get_file_content":
             print(f"🔧 GitHub: accessing {repo_name} (reading {input_data['path']})...")
             repo = github_client.get_repo(input_data["repo_full_name"])
-            file_content = repo.get_contents(input_data["path"])
-            return file_content.decoded_content.decode("utf-8")
+            contents = repo.get_contents(input_data["path"])
+            
+            if isinstance(contents, list):
+                # It's a directory
+                print(f"📁 GitHub: entering directory {input_data['path']}...")
+                files = []
+                for item in contents:
+                    if item.type == "file" and item.name.lower().endswith(('.py', '.md', '.txt', '.json')):
+                        files.append(item.path)
+                return {"type": "directory", "files": files}
+            else:
+                # It's a file
+                return contents.decoded_content.decode("utf-8")
         
         elif name == "create_or_update_files":
-            print(f"🔧 GitHub: accessing {repo_name} (committing changes to {input_data['branch_name']})...")
+            print(f"✅ Committing improved code to {repo_name}...")
             repo = github_client.get_repo(input_data["repo_full_name"])
             base_branch = repo.get_branch("main")
             
@@ -210,9 +221,9 @@ def execute_github_tool(name, input_data):
             return f"Successfully committed changes to {input_data['branch_name']}"
         
         elif name == "create_pull_request":
-            print(f"🔧 GitHub: accessing {repo_name} (creating PR: {input_data['title']})...")
             repo = github_client.get_repo(input_data["repo_full_name"])
             pr = repo.create_pull(title=input_data["title"], body=input_data["body"], head=input_data["head"], base=input_data.get("base", "main"))
+            print(f"🔗 PR created: {pr.html_url}")
             return {"pr_url": pr.html_url, "number": pr.number}
             
     except Exception as e:
@@ -373,14 +384,22 @@ def handle_message(event, client, say):
     messages = [{"role": "user", "content": text}]
     tools = GITHUB_TOOLS if agent_key == "DEV_LEAD" else []
     
+    # Track files read for optimization
+    files_read_count = 0
+    max_files = 3
+    max_chars = 2000
+    repo_full_name = "unknown"
+
     try:
         while True:
+            # Set 30s timeout for Claude API call
             res = claude.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048,
                 system=sys_prompt,
                 tools=tools if tools else anthropic.NOT_GIVEN,
-                messages=messages
+                messages=messages,
+                timeout=30.0
             )
             
             if res.stop_reason == "tool_use":
@@ -388,16 +407,71 @@ def handle_message(event, client, say):
                 tool_results = []
                 for content_block in res.content:
                     if content_block.type == "tool_use":
-                        result = execute_github_tool(content_block.name, content_block.input)
+                        # Capture repo name for automation
+                        if "repo_full_name" in content_block.input:
+                            repo_full_name = content_block.input["repo_full_name"]
+
+                        # Optimization: Limit and Truncate for Dev Lead
+                        if agent_key == "DEV_LEAD" and content_block.name == "get_file_content":
+                            if files_read_count >= max_files:
+                                result = "Limit of 3 files reached. Please proceed with available info."
+                            else:
+                                raw_result = execute_github_tool(content_block.name, content_block.input)
+                                if isinstance(raw_result, str):
+                                    result = raw_result[:max_chars] + ("... [truncated]" if len(raw_result) > max_chars else "")
+                                    files_read_count += 1
+                                else:
+                                    result = raw_result
+                        else:
+                            result = execute_github_tool(content_block.name, content_block.input)
+                        
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": content_block.id,
                             "content": json.dumps(result)
                         })
                 messages.append({"role": "user", "content": tool_results})
+                
+                # Check if we should now prompt for the final improvement
+                if agent_key == "DEV_LEAD" and files_read_count > 0:
+                    print("🤖 Sending to Claude for improvement...")
+                    # Append a specific instruction to the conversation
+                    messages.append({
+                        "role": "user", 
+                        "content": "Improve this code. Make actual changes. Return improved code only."
+                    })
                 continue
             
             reply = res.content[0].text
+            
+            # Post-processing for DEV_LEAD GitHub Automation
+            if agent_key == "DEV_LEAD" and files_read_count > 0:
+                code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", reply, re.DOTALL)
+                if code_match:
+                    improved_code = code_match.group(1)
+                    if repo_full_name != "unknown":
+                        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                        branch_name = f"slackos-fix-{timestamp}"
+                        
+                        # Automated Commit
+                        execute_github_tool("create_or_update_files", {
+                            "repo_full_name": repo_full_name,
+                            "branch_name": branch_name,
+                            "commit_message": "SlackOS: Code improvements",
+                            "file_changes": [{"path": "main.py", "content": improved_code}] 
+                        })
+                        
+                        # Automated PR
+                        pr_res = execute_github_tool("create_pull_request", {
+                            "repo_full_name": repo_full_name,
+                            "title": "SlackOS: Code improvements",
+                            "body": "Automated code improvements by SlackOS Dev Lead.",
+                            "head": branch_name
+                        })
+                        
+                        if isinstance(pr_res, dict) and "pr_url" in pr_res:
+                            reply += f"\n\n🔗 PR created: {pr_res['pr_url']}"
+            
             break
             
         log_api_call(selected_agent_config["name"])
