@@ -409,12 +409,6 @@ def handle_message(event, client, say):
             
     except Exception as e:
         print(f"❌ Delivery failed for {agent_key}: {e}")
-        if agent_key != "CHIEF_OF_STAFF":
-            # Post simple failure message to #ops using CoS token
-            AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
-                channel=CHANNELS["MAIN"], 
-                text=f"⚠️ {selected_agent_config['name']} unavailable. Please try again."
-            )
 
 if __name__ == "__main__":
     print("🚀 SlackOS Router is live.")
