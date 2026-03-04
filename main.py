@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import anthropic
@@ -664,11 +665,9 @@ def handle_message(event, client, say):
         # Add Identity Header + v0.2.2 Versioning
         reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
 
-        # Add Identity Header + v0.2.2 Versioning
-        reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
-
         # Agent posts in their own workspace using their own token
         selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
+        sys.stdout.flush()
         
         # 6. Global Review (Only for specialists)
         if agent_key != "CHIEF_OF_STAFF":
