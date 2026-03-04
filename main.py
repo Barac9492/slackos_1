@@ -310,17 +310,28 @@ def log_api_call(agent_name, status="Success"):
         AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(channel=CHANNELS["LOGS"], text=msg)
     except: pass
 
-ROUTER_PROMPT = """
-You are a router. Analyze the user task and decide which specialist should handle it.
-Reply with a JSON object: {"agent_key": "...", "task_summary": "One line summary of the task"}
-
-Keys:
-- RESEARCH_LEAD: market/startup research, analysis, deal sourcing, LP intel
-- DEV_LEAD: code, technical architecture, automations, GitHub
-- CONTENT_LEAD: LinkedIn posts, newsletter, writing
-- DESIGN_LEAD: deck structure, wireframes, visual specs
-- CHIEF_OF_STAFF: strategy, coordination, or if it's unclear
-"""
+def determine_agent(text):
+    text_lower = text.lower()
+    
+    # 1. GitHub URL or explicit keywords -> DEV_LEAD
+    if re.search(r"github\.com/[\w-]+/[\w-]+", text_lower) or \
+       any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug"]):
+        return "DEV_LEAD", "Technical/GitHub task"
+    
+    # 2. Research Keywords -> RESEARCH_LEAD
+    if any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund"]):
+        return "RESEARCH_LEAD", "Market/Startup research"
+    
+    # 3. Content Keywords -> CONTENT_LEAD
+    if any(k in text_lower for k in ["write", "post", "linkedin", "newsletter", "content", "draft"]):
+        return "CONTENT_LEAD", "Content/Writing task"
+    
+    # 4. Design Keywords -> DESIGN_LEAD
+    if any(k in text_lower for k in ["deck", "design", "slide", "visual", "ui", "ux"]):
+        return "DESIGN_LEAD", "Design/Visual task"
+    
+    # Default
+    return "CHIEF_OF_STAFF", "Coordination/General task"
 
 app = App(token=AGENTS["CHIEF_OF_STAFF"]["token"])
 
@@ -334,22 +345,8 @@ def handle_message(event, client, say):
 
     print(f"📩 Input: {text[:50]}...")
 
-    # 1. Routing Decision
-    try:
-        route_res = claude.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=150,
-            system=ROUTER_PROMPT,
-            messages=[{"role": "user", "content": text}]
-        )
-        content = route_res.content[0].text
-        data = json.loads(content[content.find("{"):content.rfind("}")+1])
-        agent_key = data.get("agent_key", "CHIEF_OF_STAFF").upper()
-        task_summary = data.get("task_summary", "Processing request")
-        if agent_key not in AGENTS: agent_key = "CHIEF_OF_STAFF"
-    except:
-        agent_key = "CHIEF_OF_STAFF"
-        task_summary = text[:50]
+    # 1. Hard-coded Routing Decision
+    agent_key, task_summary = determine_agent(text)
     
     selected_agent_config = AGENTS[agent_key]
     selected_agent_client = AGENT_CLIENTS[agent_key]
@@ -359,7 +356,7 @@ def handle_message(event, client, say):
     if agent_key != "CHIEF_OF_STAFF":
         AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
             channel=CHANNELS["MAIN"], 
-            text=f"Routing to {selected_agent_config['name']}. {task_summary}"
+            text=f"🎯 Routing to {selected_agent_config['name']}: {task_summary}"
         )
 
     # 2. Context & Profile
