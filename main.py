@@ -539,7 +539,7 @@ def handle_message(event, client, say):
             print(f"🔄 Calling Claude API for {agent_key} (msgs: {len(messages)})...", flush=True)
             res = claude.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=2048 if agent_key != "CHIEF_OF_STAFF" else 100,
+                max_tokens=4096 if agent_key == "DEV_LEAD" else (2048 if agent_key != "CHIEF_OF_STAFF" else 100),
                 system=sys_prompt,
                 tools=all_tools if all_tools else anthropic.NOT_GIVEN,
                 messages=messages,
@@ -645,7 +645,8 @@ def handle_message(event, client, say):
                             reply += f"\n\n🔗 PR created: {pr_res['pr_url']}"
             
             break
-            
+
+        print(f"📤 Reply ready ({len(reply)} chars). Posting...", flush=True)
         log_api_call(selected_agent_config["name"])
 
         # 4. Persistence
@@ -661,13 +662,13 @@ def handle_message(event, client, say):
         target_channel = selected_agent_config["channel"]
         if not reply.strip():
             reply = "✅ Agent action completed (no text response)."
-            
+
         # Add Identity Header + v0.2.2 Versioning
         reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
 
         # Agent posts in their own workspace using their own token
         selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
-        sys.stdout.flush()
+        print(f"✅ Posted to {target_channel}", flush=True)
         
         # 6. Global Review (Only for specialists)
         if agent_key != "CHIEF_OF_STAFF":
