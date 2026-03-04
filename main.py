@@ -285,8 +285,3 @@ if __name__ == "__main__":
     print("🚀 SlackOS Router is starting...")
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
     handler.start()
-
-if __name__ == "__main__":
-    print("🚀 SlackOS Router is starting...")
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
