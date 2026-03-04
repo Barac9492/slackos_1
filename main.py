@@ -75,13 +75,8 @@ AGENTS = {
             "\nWhen a repository URL or task is received:\n"
             "1. Extract the repository name (owner/repo) from the URL if provided.\n"
             "2. List repository files and read content of ALL Python files (*.py) for analysis.\n"
-            "3. Formulate and implement code improvements directly.\n"
-            "4. Create a NEW branch named 'slackos-fix-[timestamp]' (replace [timestamp] with current date-time).\n"
-            "5. Commit and push the improved files.\n"
-            "6. Open a Pull Request with:\n"
-            "   - Title: 'SlackOS: Code improvements'\n"
-            "   - Description: Detailed summary of changes made.\n"
-            "7. Your final response MUST include the Pull Request link prominently.\n"
+            "6. Open a Pull Request.\n"
+            "7. Note: The system will automatically detect code blocks in your response and commit them if you don't use the tools directly.\n"
         ),
     },
     "CONTENT_LEAD": {
@@ -578,20 +573,30 @@ def handle_message(event, client, say):
                 messages.append({"role": "user", "content": tool_results})
                 
                 # Check if we should now prompt for the final improvement
-                if agent_key == "DEV_LEAD" and files_read_count > 0:
-                    print("🤖 Sending to Claude for improvement...")
-                    messages.append({
-                        "role": "user", 
-                        "content": "Improve this code. Make actual changes. Return improved code only. Formatting: ```python:path/to/file.py\n[code]\n```"
-                    })
+                # Only if we've reached the limit and haven't prompted yet
+                if agent_key == "DEV_LEAD" and files_read_count == max_files:
+                    if not any("Improve this code" in str(m.get("content", "")) for m in messages):
+                        print("🤖 File limit reached. Prompting for improvement...")
+                        messages.append({
+                            "role": "user", 
+                            "content": "Limit of 3 files reached. Based on the files you've read, please provide the improved code now. Formatting: ```python:path/to/file.py\n[code]\n```"
+                        })
                 continue
             
             reply = extract_text(res.content)
             
             # Post-processing for DEV_LEAD GitHub Automation
             if agent_key == "DEV_LEAD" and files_read_count > 0:
-                # Try to find format ```python:path\n[code]\n```
-                code_matches = re.findall(r"```(?:\w+:)?([\w\./-]+)?\n(.*?)\n```", reply, re.DOTALL)
+                # Robust regex for code blocks with optional language and path hints
+                code_matches = re.findall(r"```(?:\w+)?[:\s]?([\w\./-]+)?\n(.*?)\n```", reply, re.DOTALL)
+                
+                # Fallback: Check for just code blocks if no path hint found
+                if not code_matches:
+                    code_matches = re.findall(r"```(?:\w+)?\n(.*?)\n```", reply, re.DOTALL)
+                    if code_matches:
+                        # If no path hint, use the first file we read
+                        code_matches = [(last_read_paths[0] if last_read_paths else "main.py", c) for c in code_matches]
+
                 if code_matches and repo_full_name != "unknown":
                     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                     branch_name = f"slackos-fix-{timestamp}"
