@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 
 load_dotenv()
+VERSION = "0.2.2"
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 github_client = Github(os.environ.get("GITHUB_TOKEN"))
@@ -45,12 +46,8 @@ AGENTS = {
         "token": os.environ.get("SLACK_BOT_TOKEN"),
         "channel": CHANNELS["MAIN"],
         "system_prompt": (
-            "You are a COORDINATOR and ROUTER ONLY. Do NOT perform any technical work, research, content writing, or design yourself.\n"
-            "Your ONLY tasks are:\n"
-            "1. Notifying the user about which agent is handling their request.\n"
-            "2. Breaking down complex cross-functional requests into sub-tasks for specialists.\n"
-            "Strict Rule: If the user asks for code, research, writing, or design, your response must ONLY be '🎯 Routing to [Agent]'.\n"
-            "NEVER provide analysis, suggestions, or plans yourself. NEVER use more than 2 sentences."
+            f"[v{VERSION}] You are a ROUTER ONLY. Your only job is to say '🎯 Routing to [Agent]'. "
+            "NEVER explain, NEVER plan, NEVER suggest. 1 sentence MAX."
         ),
     },
     "RESEARCH_LEAD": {
@@ -644,8 +641,8 @@ def handle_message(event, client, say):
         if not reply.strip():
             reply = "✅ Agent action completed (no text response)."
             
-        # Add Identity Header to resolve multi-token display issue
-        reply = f"*[Agent: {selected_agent_config['name']}]*\n{reply}"
+        # Add Identity Header + v0.2.2 Versioning
+        reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
 
         # Agent posts in their own workspace using their own token
         selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
@@ -752,7 +749,7 @@ def weekly_task_coordination():
         reply = extract_text(res.content)
         if not reply.strip():
             reply = "No coordination tasks defined for this week."
-        client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"📅 *Weekly Team Coordination*\n\n{reply}")
+        client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"📅 [v{VERSION}] *Weekly Team Coordination*\n\n{reply}")
     except Exception as e:
         alert_error("CHIEF_OF_STAFF", f"Weekly Coordination failed: {e}")
 
