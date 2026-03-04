@@ -480,11 +480,31 @@ def handle_message(event, client, say):
 
     try:
         print(f"📩 Input: {text[:50]}...")
-
-        # 1. Hard-coded Routing Decision
-        # 1. Determine Agent (with hardened routing)
-        agent_key, task_summary = determine_agent(text, channel_id)
         
+        # --- MISSION v3 BRUTE FORCE ROUTING ---
+        text_lower = text.lower()
+        agent_key = None
+        task_summary = "General"
+
+        # 1. Force GitHub/Technical -> DEV_LEAD
+        if re.search(r"github\.com/[\w-]+/[\w-]+", text_lower) or \
+           any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug", "python", "script", "api", "개선"]):
+            agent_key, task_summary = "DEV_LEAD", "Technical/GitHub (Brute Force)"
+        
+        # 2. Force Research -> RESEARCH_LEAD
+        elif any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund", "vc", "news", "분석", "조사"]):
+            agent_key, task_summary = "RESEARCH_LEAD", "Research (Brute Force)"
+            
+        # 3. Fallback to staged routing if not forced
+        if not agent_key:
+            agent_key, task_summary = determine_agent(text, channel_id)
+
+        # DEBUG LOGGING (Mission v3)
+        try:
+            with open(os.path.join(DATA_DIR, "routing_debug.txt"), "a") as f:
+                f.write(f"[{datetime.now().isoformat()}] CH:{channel_id} | AGENT:{agent_key} | MSG:{text[:50]}...\n")
+        except: pass
+
         selected_agent_config = AGENTS[agent_key]
         selected_agent_client = AGENT_CLIENTS[agent_key]
         print(f"🎯 Route: {agent_key}")
@@ -641,6 +661,9 @@ def handle_message(event, client, say):
         if not reply.strip():
             reply = "✅ Agent action completed (no text response)."
             
+        # Add Identity Header + v0.2.2 Versioning
+        reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
+
         # Add Identity Header + v0.2.2 Versioning
         reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
 
