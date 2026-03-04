@@ -16,6 +16,11 @@ load_dotenv()
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 github_client = Github(os.environ.get("GITHUB_TOKEN"))
 
+def extract_text(content):
+    """Safely extract all text from a list of Anthropic content blocks."""
+    if isinstance(content, str): return content
+    return "".join(block.text for block in content if hasattr(block, 'text'))
+
 # Persistence Configuration
 DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -402,7 +407,7 @@ class ProfileManager:
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}]
                 )
-                txt = res.content[0].text
+                txt = extract_text(res.content)
                 new_p = json.loads(txt[txt.find("{"):txt.rfind("}")+1])
                 ProfileManager.save(new_p)
                 print("✅ Profile updated.")
@@ -462,7 +467,7 @@ def determine_agent(text, channel_id=None):
             max_tokens=10,
             messages=[{"role": "user", "content": prompt}]
         )
-        decision = res.content[0].text.strip().upper()
+        decision = extract_text(res.content).strip().upper()
         if decision in AGENTS:
             return decision, f"LLM Guard decision ({decision})"
     except Exception as e:
@@ -581,7 +586,7 @@ def handle_message(event, client, say):
                     })
                 continue
             
-            reply = res.content[0].text
+            reply = extract_text(res.content)
             
             # Post-processing for DEV_LEAD GitHub Automation
             if agent_key == "DEV_LEAD" and files_read_count > 0:
@@ -711,7 +716,7 @@ def daily_morning_briefing():
             messages=[{"role": "user", "content": prompt}]
         )
         
-        reply = res.content[0].text
+        reply = extract_text(res.content)
         client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"🌅 *Daily Morning Briefing (Research Lead)*\n\n{reply}")
     except Exception as e:
         alert_error("RESEARCH_LEAD", f"Daily Briefing failed: {e}")
@@ -731,7 +736,7 @@ def weekly_task_coordination():
             messages=[{"role": "user", "content": prompt}]
         )
         
-        reply = res.content[0].text
+        reply = extract_text(res.content)
         client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"📅 *Weekly Team Coordination*\n\n{reply}")
     except Exception as e:
         alert_error("CHIEF_OF_STAFF", f"Weekly Coordination failed: {e}")
