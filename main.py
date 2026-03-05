@@ -13,7 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 
 load_dotenv()
-VERSION = "0.2.2"
+VERSION = "0.4.0"
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 github_client = Github(os.environ.get("GITHUB_TOKEN"))
@@ -28,6 +28,7 @@ DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
 MEMORY_FILE = os.path.join(DATA_DIR, "memory.jsonl")
 PROFILE_FILE = os.path.join(DATA_DIR, "ethan_profile.json")
+TASKS_FILE = os.path.join(DATA_DIR, "tasks.jsonl")
 
 # Channel Configuration
 CHANNELS = {
@@ -58,8 +59,13 @@ AGENTS = {
         "system_prompt": (
             "You are Research Lead, an AI agent working for Ethan (CIO at TheVentures). "
             "You specialize in deal sourcing, market analysis, startup evaluation, and LP intelligence. "
-            "You track Korean AI startups, Korean diaspora founders, and investment trends. "
-            "Be analytical and precise."
+            "You track Korean AI startups, Korean diaspora founders, and investment trends.\n\n"
+            "CRITICAL RULES:\n"
+            "- You MUST use the web_search tool to find real, current data. NEVER fabricate or hallucinate facts.\n"
+            "- Always cite sources with URLs when available.\n"
+            "- Use GitHub tools to read repos when analyzing technical startups.\n"
+            "- Be analytical and precise. Numbers over narratives.\n"
+            "- Output format: structured briefing with clear sections and bullet points."
         ),
     },
     "DEV_LEAD": {
@@ -69,12 +75,17 @@ AGENTS = {
         "system_prompt": (
             "You are Dev Lead, an AI agent working for Ethan (CIO at TheVentures). "
             "You handle all technical tasks: writing code, building automations, managing GitHub repos, and technical architecture. "
-            "You have direct access to the GitHub API. "
-            "\nWhen a repository URL or task is received:\n"
+            "You have direct access to the GitHub API.\n\n"
+            "WORKFLOW — follow these steps in order:\n"
             "1. Extract the repository name (owner/repo) from the URL if provided.\n"
-            "2. List repository files and read content of ALL Python files (*.py) for analysis.\n"
-            "6. Open a Pull Request.\n"
-            "7. Note: The system will automatically detect code blocks in your response and commit them if you don't use the tools directly.\n"
+            "2. Use list_repository_files to explore the repo structure.\n"
+            "3. Use get_file_content to read key files (max 3 files).\n"
+            "4. Analyze the code and write improved versions.\n"
+            "5. Use create_or_update_files to commit changes to a new branch.\n"
+            "6. Use create_pull_request to open a PR.\n"
+            "7. Report the PR link.\n\n"
+            "CRITICAL: You MUST use the GitHub tools to commit and create PRs. Do NOT just describe what you would do — actually DO it.\n"
+            "If you include code blocks in your response, format them as ```python:path/to/file.py for automatic commit."
         ),
     },
     "CONTENT_LEAD": {
@@ -82,13 +93,17 @@ AGENTS = {
         "token": os.environ.get("SLACK_BOT_TOKEN_CONTENT"),
         "channel": CHANNELS["CONTENT"],
         "system_prompt": (
-            "You handle LinkedIn posts, newsletters (애당초의 미디움 레어), and LP materials. "
-            "\n\nGEO (Generative Engine Optimization) Checklist:\n"
-            "1. USE Authoritative citations.\n"
-            "2. ADD clear statistics and data points.\n"
-            "3. ENSURE unique insights not found in generic AI outputs.\n"
-            "4. OPTIMIZE for AI citation by using structured lists and clear headers.\n"
-            "When asked to optimize, apply this checklist and save the result using save_to_obsidian."
+            "You are Content Lead, an AI agent working for Ethan (CIO at TheVentures). "
+            "You handle LinkedIn posts, newsletters (애당초의 미디움 레어), and LP materials.\n\n"
+            "CRITICAL RULES:\n"
+            "- Use web_search to research topics before writing. Ground content in real data.\n"
+            "- Always save final drafts using the save_to_obsidian tool.\n"
+            "- Apply GEO (Generative Engine Optimization) checklist to all content:\n"
+            "  1. USE authoritative citations with real sources.\n"
+            "  2. ADD clear statistics and data points.\n"
+            "  3. ENSURE unique insights not found in generic AI outputs.\n"
+            "  4. OPTIMIZE for AI citation using structured lists and clear headers.\n"
+            "- Output: polished, publication-ready drafts. Not outlines."
         ),
     },
     "DESIGN_LEAD": {
@@ -97,8 +112,13 @@ AGENTS = {
         "channel": CHANNELS["DESIGN"],
         "system_prompt": (
             "You are Design Lead, an AI agent working for Ethan (CIO at TheVentures). "
-            "You handle deck structure, presentation design specs, wireframes, and visual communication. "
-            "You produce clear specifications that others can implement."
+            "You handle deck structure, presentation design specs, wireframes, and visual communication.\n\n"
+            "CRITICAL RULES:\n"
+            "- Produce COMPLETE, actionable specs — not vague suggestions.\n"
+            "- For decks: specify exact slide count, layout per slide, content per section, and visual direction.\n"
+            "- For wireframes: describe layout in structured format (grid, sections, components).\n"
+            "- Include color palette (hex codes), typography recommendations, and spacing guidelines.\n"
+            "- Output format: structured markdown spec that a designer or tool can directly implement."
         ),
     },
 }
@@ -331,10 +351,12 @@ class MemoryManager:
         context = relevant[-limit:]
         
         if not context: return ""
-        
+
         ctx_str = "\nPrevious relevant context:\n"
         for m in context:
-            ctx_str += f"- User: {m['user_message']}\n  {m['agent']}: {m['agent_response']}\n"
+            user_msg = m['user_message'][:150]
+            agent_resp = m['agent_response'][:200]
+            ctx_str += f"- User: {user_msg}\n  {m['agent']}: {agent_resp}\n"
         return ctx_str
 
 class ProfileManager:
@@ -390,6 +412,98 @@ class ProfileManager:
                 print("✅ Profile updated.")
             except Exception as e:
                 print(f"❌ Profile update failed: {e}")
+
+class TaskManager:
+    _counter = 0
+
+    @staticmethod
+    def _next_id():
+        TaskManager._counter += 1
+        return f"T-{datetime.now().strftime('%Y%m%d')}-{TaskManager._counter:03d}"
+
+    @staticmethod
+    def create(agent_key, description, source, channel_id, thread_ts=None,
+               priority="P1", parent_task_id=None, handoff_to=None, handoff_prompt=None):
+        task = {
+            "task_id": TaskManager._next_id(),
+            "agent_key": agent_key,
+            "description": description,
+            "status": "pending",
+            "priority": priority,
+            "source": source,
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "result_summary": None,
+            "review_message_ts": None,
+            "parent_task_id": parent_task_id,
+            "handoff_to": handoff_to,
+            "handoff_prompt": handoff_prompt,
+            "created_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "rework_count": 0,
+        }
+        with open(TASKS_FILE, "a") as f:
+            f.write(json.dumps(task, ensure_ascii=False) + "\n")
+        print(f"📝 Task created: {task['task_id']} -> {agent_key}")
+        return task["task_id"]
+
+    @staticmethod
+    def _load_all():
+        if not os.path.exists(TASKS_FILE):
+            return []
+        tasks = []
+        with open(TASKS_FILE, "r") as f:
+            for line in f:
+                try:
+                    tasks.append(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        return tasks
+
+    @staticmethod
+    def _save_all(tasks):
+        with open(TASKS_FILE, "w") as f:
+            for t in tasks:
+                f.write(json.dumps(t, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def update(task_id, **fields):
+        tasks = TaskManager._load_all()
+        for t in tasks:
+            if t["task_id"] == task_id:
+                t.update(fields)
+                break
+        TaskManager._save_all(tasks)
+
+    @staticmethod
+    def get(task_id):
+        for t in TaskManager._load_all():
+            if t["task_id"] == task_id:
+                return t
+        return None
+
+    @staticmethod
+    def get_pending(agent_key=None):
+        tasks = TaskManager._load_all()
+        pending = [t for t in tasks if t["status"] == "pending"]
+        if agent_key:
+            pending = [t for t in pending if t["agent_key"] == agent_key]
+        # Sort by priority (P0 first)
+        pending.sort(key=lambda t: t.get("priority", "P1"))
+        return pending
+
+    @staticmethod
+    def get_recent(n=10):
+        tasks = TaskManager._load_all()
+        return tasks[-n:]
+
+    @staticmethod
+    def find_by_review_ts(message_ts):
+        for t in TaskManager._load_all():
+            if t.get("review_message_ts") == message_ts:
+                return t
+        return None
+
 
 def log_api_call(agent_name, status="Success"):
     try:
@@ -454,38 +568,229 @@ def determine_agent(text, channel_id=None):
     # Default
     return "CHIEF_OF_STAFF", "Default to Coordination"
 
+def run_agent_loop(agent_key, text):
+    """Execute an agent's Claude loop with tools. Returns the final reply text."""
+    agent_config = AGENTS[agent_key]
+
+    # Context & Profile
+    ctx = MemoryManager.get_context(agent_key)
+    profile = ProfileManager.load()
+    sys_prompt = (
+        f"{agent_config['system_prompt']}\n\n"
+        f"CURRENT TIME: {datetime.now().isoformat()}\n\n"
+        f"USER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n"
+        f"{ctx}"
+    )
+
+    # Tool selection
+    messages = [{"role": "user", "content": text}]
+    client_tools = []
+    server_tools = []
+    if agent_key == "DEV_LEAD":
+        client_tools = GITHUB_TOOLS
+    elif agent_key == "RESEARCH_LEAD":
+        client_tools = RESEARCH_TOOLS
+        server_tools = [WEB_SEARCH_TOOL]
+    elif agent_key == "CONTENT_LEAD":
+        client_tools = CONTENT_TOOLS
+        server_tools = [WEB_SEARCH_TOOL]
+
+    all_tools = client_tools + server_tools
+
+    # Dev Lead file tracking
+    files_read_count = 0
+    last_read_paths = []
+    max_files = 3
+    max_chars = 2000
+    repo_full_name = "unknown"
+
+    while True:
+        print(f"🔄 Calling Claude API for {agent_key} (msgs: {len(messages)})...", flush=True)
+        res = claude.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=8192 if agent_key == "DEV_LEAD" else (2048 if agent_key != "CHIEF_OF_STAFF" else 100),
+            system=sys_prompt,
+            tools=all_tools if all_tools else anthropic.NOT_GIVEN,
+            messages=messages,
+            timeout=120.0
+        )
+        print(f"✅ Claude responded: stop_reason={res.stop_reason}", flush=True)
+
+        if res.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": res.content})
+            tool_results = []
+            for content_block in res.content:
+                if content_block.type == "tool_use":
+                    if "repo_full_name" in content_block.input:
+                        repo_full_name = content_block.input["repo_full_name"]
+
+                    if agent_key == "DEV_LEAD" and content_block.name == "get_file_content":
+                        if "path" in content_block.input:
+                            last_read_paths.append(content_block.input["path"])
+                        if files_read_count >= max_files:
+                            result = "Limit of 3 files reached. Please proceed with available info."
+                        else:
+                            raw_result = execute_github_tool(content_block.name, content_block.input)
+                            if isinstance(raw_result, str):
+                                result = raw_result[:max_chars] + ("... [truncated]" if len(raw_result) > max_chars else "")
+                                files_read_count += 1
+                            else:
+                                result = raw_result
+                    else:
+                        if content_block.name == "save_to_obsidian":
+                            result = execute_storage_tool(content_block.name, content_block.input)
+                        else:
+                            result = execute_github_tool(content_block.name, content_block.input)
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": content_block.id,
+                        "content": json.dumps(result)
+                    })
+            messages.append({"role": "user", "content": tool_results})
+
+            if agent_key == "DEV_LEAD" and files_read_count == max_files:
+                if not any("Improve this code" in str(m.get("content", "")) for m in messages):
+                    print("🤖 File limit reached. Prompting for improvement...")
+                    messages.append({
+                        "role": "user",
+                        "content": "Limit of 3 files reached. Based on the files you've read, please provide the improved code now. Formatting: ```python:path/to/file.py\n[code]\n```"
+                    })
+            continue
+
+        if res.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": res.content})
+            messages.append({"role": "user", "content": "Continue."})
+            continue
+
+        reply = extract_text(res.content)
+
+        # Dev Lead: auto-commit + PR from code blocks
+        if agent_key == "DEV_LEAD" and files_read_count > 0:
+            code_matches = re.findall(r"```(?:\w+)?[:\s]?([\w\./-]+)?\n(.*?)\n```", reply, re.DOTALL)
+            if not code_matches:
+                code_matches = re.findall(r"```(?:\w+)?\n(.*?)\n```", reply, re.DOTALL)
+                if code_matches:
+                    code_matches = [(last_read_paths[0] if last_read_paths else "main.py", c) for c in code_matches]
+
+            if code_matches and repo_full_name != "unknown":
+                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                branch_name = f"slackos-fix-{timestamp}"
+                file_changes = []
+                for path_hint, improved_code in code_matches:
+                    target_path = path_hint or (last_read_paths[0] if last_read_paths else "main.py")
+                    file_changes.append({"path": target_path, "content": improved_code})
+
+                if file_changes:
+                    execute_github_tool("create_or_update_files", {
+                        "repo_full_name": repo_full_name,
+                        "branch_name": branch_name,
+                        "commit_message": "SlackOS: Code improvements",
+                        "file_changes": file_changes
+                    })
+                    pr_res = execute_github_tool("create_pull_request", {
+                        "repo_full_name": repo_full_name,
+                        "title": "SlackOS: Code improvements",
+                        "body": "Automated code improvements by SlackOS Dev Lead.",
+                        "head": branch_name
+                    })
+                    if isinstance(pr_res, dict) and "pr_url" in pr_res:
+                        reply += f"\n\n🔗 PR created: {pr_res['pr_url']}"
+
+        return reply
+
+
+def dispatch_task(task_id):
+    """Execute a tracked task: run agent loop, post to #review for approval."""
+    task = TaskManager.get(task_id)
+    if not task:
+        print(f"❌ dispatch_task: task {task_id} not found")
+        return
+
+    agent_key = task["agent_key"]
+    agent_config = AGENTS[agent_key]
+    agent_client = AGENT_CLIENTS[agent_key]
+
+    TaskManager.update(task_id, status="in_progress")
+    print(f"🚀 Dispatching {task_id} to {agent_key}...")
+
+    try:
+        # Build prompt — include rework context if re-dispatched
+        prompt = task["description"]
+        if task.get("rework_count", 0) > 0 and task.get("result_summary"):
+            prompt = (
+                f"REWORK REQUEST (attempt {task['rework_count'] + 1}):\n"
+                f"Previous result was not approved. Please improve.\n"
+                f"Previous output summary: {task['result_summary']}\n\n"
+                f"Original task: {task['description']}"
+            )
+
+        reply = run_agent_loop(agent_key, prompt)
+
+        if not reply or not reply.strip():
+            reply = "✅ Agent action completed (no text response)."
+
+        TaskManager.update(task_id, status="completed",
+                          result_summary=reply[:500],
+                          completed_at=datetime.now().isoformat())
+
+        log_api_call(agent_config["name"])
+
+        # Post to #review for approval
+        review_msg = (
+            f"📋 *Task {task_id}* by *{agent_config['name']}*\n"
+            f"*Priority:* {task.get('priority', 'P1')} | *Source:* {task.get('source', 'unknown')}\n\n"
+            f"{reply[:1500]}\n\n"
+            f"React: ✅ approve | ❌ reject | 🔄 rework"
+        )
+        result = agent_client.chat_postMessage(channel=CHANNELS["REVIEW"], text=review_msg)
+        TaskManager.update(task_id, review_message_ts=result["ts"])
+
+        # Post to originating channel if specified and different from #review
+        if task.get("channel_id") and task["channel_id"] != CHANNELS["REVIEW"]:
+            tagged_reply = f"*[Agent: {agent_config['name']} v{VERSION}]*\n{reply}"
+            agent_client.chat_postMessage(
+                channel=task["channel_id"], text=tagged_reply,
+                thread_ts=task.get("thread_ts")
+            )
+
+        # Memory persistence
+        MemoryManager.save(agent_config["name"], task["description"], reply, task.get("channel_id", ""))
+
+        # Handle handoff if specified
+        if task.get("handoff_to") and task["handoff_to"] in AGENTS:
+            child_id = TaskManager.create(
+                agent_key=task["handoff_to"],
+                description=task.get("handoff_prompt") or f"Continue from {task_id}: {reply[:200]}",
+                source=f"handoff:{agent_key}",
+                channel_id=task.get("channel_id", CHANNELS["REVIEW"]),
+                parent_task_id=task_id
+            )
+            dispatch_task(child_id)
+
+    except Exception as e:
+        TaskManager.update(task_id, status="failed", result_summary=str(e)[:500])
+        alert_error(agent_key, f"Task {task_id} failed: {e}", task.get("channel_id"))
+        print(f"❌ dispatch_task failed for {task_id}: {e}")
+
+
 app = App(token=AGENTS["CHIEF_OF_STAFF"]["token"])
 
 @app.event("message")
 def handle_message(event, client, say):
     if event.get("subtype") == "bot_message" or event.get("bot_id"): return
-    
+
     channel_id = event["channel"]
     text = event.get("text", "")
+    thread_ts = event.get("thread_ts") or event.get("ts")
     if not text: return
 
     try:
         print(f"📩 Input: {text[:50]}...")
-        
-        # --- MISSION v3 BRUTE FORCE ROUTING ---
-        text_lower = text.lower()
-        agent_key = None
-        task_summary = "General"
 
-        # 1. Force GitHub/Technical -> DEV_LEAD
-        if re.search(r"github\.com/[\w-]+/[\w-]+", text_lower) or \
-           any(k in text_lower for k in ["code", "github", "technical", "develop", "build", "fix", "bug", "python", "script", "api", "개선"]):
-            agent_key, task_summary = "DEV_LEAD", "Technical/GitHub (Brute Force)"
-        
-        # 2. Force Research -> RESEARCH_LEAD
-        elif any(k in text_lower for k in ["research", "analyze", "market", "startup", "investor", "fund", "vc", "news", "분석", "조사"]):
-            agent_key, task_summary = "RESEARCH_LEAD", "Research (Brute Force)"
-            
-        # 3. Fallback to staged routing if not forced
-        if not agent_key:
-            agent_key, task_summary = determine_agent(text, channel_id)
+        agent_key, task_summary = determine_agent(text, channel_id)
 
-        # DEBUG LOGGING (Mission v3)
+        # Debug logging
         try:
             with open(os.path.join(DATA_DIR, "routing_debug.txt"), "a") as f:
                 f.write(f"[{datetime.now().isoformat()}] CH:{channel_id} | AGENT:{agent_key} | MSG:{text[:50]}...\n")
@@ -496,160 +801,35 @@ def handle_message(event, client, say):
         selected_agent_client = AGENT_CLIENTS[agent_key]
         print(f"🎯 Route: {agent_key}")
 
-        # Chief of Staff notifies routing in #ops
+        # Chief of Staff notifies routing
         if agent_key != "CHIEF_OF_STAFF":
             AGENT_CLIENTS["CHIEF_OF_STAFF"].chat_postMessage(
-                channel=CHANNELS["MAIN"], 
+                channel=CHANNELS["MAIN"],
                 text=f"🎯 Routing to {selected_agent_config['name']}: {task_summary}"
             )
 
-        # 2. Context & Profile
-        ctx = MemoryManager.get_context(agent_key)
-        profile = ProfileManager.load()
-        sys_prompt = (
-            f"{selected_agent_config['system_prompt']}\n\n"
-            f"CURRENT TIME: {datetime.now().isoformat()}\n\n"
-            f"USER PROFILE (Ethan):\n{json.dumps(profile, indent=2)}\n"
-            f"{ctx}"
+        # Create tracked task
+        task_id = TaskManager.create(
+            agent_key=agent_key, description=text,
+            source=f"user:{event.get('user', 'unknown')}",
+            channel_id=channel_id, thread_ts=thread_ts
         )
 
-        # 3. Execution (with Tool Support)
-        messages = [{"role": "user", "content": text}]
-        client_tools = []
-        server_tools = []
-        if agent_key == "DEV_LEAD":
-            client_tools = GITHUB_TOOLS
-        elif agent_key == "RESEARCH_LEAD":
-            client_tools = RESEARCH_TOOLS
-            server_tools = [WEB_SEARCH_TOOL]
-        elif agent_key == "CONTENT_LEAD":
-            client_tools = CONTENT_TOOLS
-            server_tools = [WEB_SEARCH_TOOL]
+        # Execute
+        reply = run_agent_loop(agent_key, text)
 
-        all_tools = client_tools + server_tools
+        if not reply or not reply.strip():
+            reply = "✅ Agent action completed (no text response)."
 
-        # Track files read for optimization
-        files_read_count = 0
-        last_read_paths = []
-        max_files = 3
-        max_chars = 2000
-        repo_full_name = "unknown"
-
-        while True:
-            print(f"🔄 Calling Claude API for {agent_key} (msgs: {len(messages)})...", flush=True)
-            res = claude.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=8192 if agent_key == "DEV_LEAD" else (2048 if agent_key != "CHIEF_OF_STAFF" else 100),
-                system=sys_prompt,
-                tools=all_tools if all_tools else anthropic.NOT_GIVEN,
-                messages=messages,
-                timeout=120.0
-            )
-            print(f"✅ Claude responded: stop_reason={res.stop_reason}", flush=True)
-
-            if res.stop_reason == "tool_use":
-                messages.append({"role": "assistant", "content": res.content})
-                tool_results = []
-                for content_block in res.content:
-                    if content_block.type == "tool_use":
-                        # Capture repo name for automation
-                        if "repo_full_name" in content_block.input:
-                            repo_full_name = content_block.input["repo_full_name"]
-
-                        # Optimization: Limit and Truncate for Dev Lead
-                        if agent_key == "DEV_LEAD" and content_block.name == "get_file_content":
-                            if "path" in content_block.input:
-                                last_read_paths.append(content_block.input["path"])
-                                
-                            if files_read_count >= max_files:
-                                result = "Limit of 3 files reached. Please proceed with available info."
-                            else:
-                                raw_result = execute_github_tool(content_block.name, content_block.input)
-                                if isinstance(raw_result, str):
-                                    result = raw_result[:max_chars] + ("... [truncated]" if len(raw_result) > max_chars else "")
-                                    files_read_count += 1
-                                else:
-                                    result = raw_result
-                        else:
-                            if content_block.name == "save_to_obsidian":
-                                result = execute_storage_tool(content_block.name, content_block.input)
-                            else:
-                                result = execute_github_tool(content_block.name, content_block.input)
-                        
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": content_block.id,
-                            "content": json.dumps(result)
-                        })
-                messages.append({"role": "user", "content": tool_results})
-                
-                # Check if we should now prompt for the final improvement
-                # Only if we've reached the limit and haven't prompted yet
-                if agent_key == "DEV_LEAD" and files_read_count == max_files:
-                    if not any("Improve this code" in str(m.get("content", "")) for m in messages):
-                        print("🤖 File limit reached. Prompting for improvement...")
-                        messages.append({
-                            "role": "user", 
-                            "content": "Limit of 3 files reached. Based on the files you've read, please provide the improved code now. Formatting: ```python:path/to/file.py\n[code]\n```"
-                        })
-                continue
-
-            # Server-side web search: Claude pauses mid-turn to deliver results
-            if res.stop_reason == "pause_turn":
-                messages.append({"role": "assistant", "content": res.content})
-                messages.append({"role": "user", "content": "Continue."})
-                continue
-
-            reply = extract_text(res.content)
-            
-            # Post-processing for DEV_LEAD GitHub Automation
-            if agent_key == "DEV_LEAD" and files_read_count > 0:
-                # Robust regex for code blocks with optional language and path hints
-                code_matches = re.findall(r"```(?:\w+)?[:\s]?([\w\./-]+)?\n(.*?)\n```", reply, re.DOTALL)
-                
-                # Fallback: Check for just code blocks if no path hint found
-                if not code_matches:
-                    code_matches = re.findall(r"```(?:\w+)?\n(.*?)\n```", reply, re.DOTALL)
-                    if code_matches:
-                        # If no path hint, use the first file we read
-                        code_matches = [(last_read_paths[0] if last_read_paths else "main.py", c) for c in code_matches]
-
-                if code_matches and repo_full_name != "unknown":
-                    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                    branch_name = f"slackos-fix-{timestamp}"
-                    file_changes = []
-                    
-                    for path_hint, improved_code in code_matches:
-                        # Determine path: hint, or first read path, or placeholder
-                        target_path = path_hint or (last_read_paths[0] if last_read_paths else "main.py")
-                        file_changes.append({"path": target_path, "content": improved_code})
-                    
-                    if file_changes:
-                        # Automated Commit
-                        execute_github_tool("create_or_update_files", {
-                            "repo_full_name": repo_full_name,
-                            "branch_name": branch_name,
-                            "commit_message": "SlackOS: Code improvements",
-                            "file_changes": file_changes
-                        })
-                        
-                        # Automated PR
-                        pr_res = execute_github_tool("create_pull_request", {
-                            "repo_full_name": repo_full_name,
-                            "title": "SlackOS: Code improvements",
-                            "body": "Automated code improvements by SlackOS Dev Lead.",
-                            "head": branch_name
-                        })
-                        
-                        if isinstance(pr_res, dict) and "pr_url" in pr_res:
-                            reply += f"\n\n🔗 PR created: {pr_res['pr_url']}"
-            
-            break
+        # Update task
+        TaskManager.update(task_id, status="completed",
+                          result_summary=reply[:500],
+                          completed_at=datetime.now().isoformat())
 
         print(f"📤 Reply ready ({len(reply)} chars). Posting...", flush=True)
         log_api_call(selected_agent_config["name"])
 
-        # 4. Persistence
+        # Persistence
         MemoryManager.save(selected_agent_config["name"], text, reply, channel_id)
         try:
             with open(MEMORY_FILE, "r") as f:
@@ -658,27 +838,104 @@ def handle_message(event, client, say):
         except Exception:
             pass
 
-        # 5. Delivery
-        target_channel = selected_agent_config["channel"]
-        if not reply.strip():
-            reply = "✅ Agent action completed (no text response)."
+        # Delivery
+        tagged_reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
 
-        # Add Identity Header + v0.2.2 Versioning
-        reply = f"*[Agent: {selected_agent_config['name']} v{VERSION}]*\n{reply}"
+        selected_agent_client.chat_postMessage(
+            channel=channel_id, text=tagged_reply, thread_ts=thread_ts
+        )
+        print(f"✅ Posted reply to originating channel {channel_id}", flush=True)
 
-        # Agent posts in their own workspace using their own token
-        selected_agent_client.chat_postMessage(channel=target_channel, text=reply)
-        print(f"✅ Posted to {target_channel}", flush=True)
-        
-        # 6. Global Review (Only for specialists)
+        # Log to agent workspace if different channel
+        agent_channel = selected_agent_config["channel"]
+        if channel_id != agent_channel:
+            try:
+                selected_agent_client.chat_postMessage(
+                    channel=agent_channel,
+                    text=f"📋 *Task from <#{channel_id}>:*\n_{text[:100]}_\n\n{tagged_reply}"
+                )
+            except Exception:
+                pass
+
+        # Post to #review for approval (specialists only)
         if agent_key != "CHIEF_OF_STAFF":
-            review_msg = f"✅ *Task Completed by {selected_agent_config['name']}*\n*Channel:* {target_channel}\n*Task:* {task_summary}\n\n*Response Summary:*\n{reply[:500]}..."
-            selected_agent_client.chat_postMessage(channel=CHANNELS["REVIEW"], text=review_msg)
-            
+            review_msg = (
+                f"📋 *Task {task_id}* by *{selected_agent_config['name']}*\n"
+                f"*Channel:* <#{channel_id}> | *Source:* user message\n\n"
+                f"{reply[:1000]}\n\n"
+                f"React: ✅ approve | ❌ reject | 🔄 rework"
+            )
+            result = selected_agent_client.chat_postMessage(channel=CHANNELS["REVIEW"], text=review_msg)
+            TaskManager.update(task_id, review_message_ts=result["ts"])
+
     except Exception as e:
         alert_error(agent_key if 'agent_key' in locals() else "Unknown", str(e), channel_id)
         print(f"❌ handle_message failed: {e}")
         sys.stdout.flush()
+
+
+@app.event("reaction_added")
+def handle_reaction(event, client):
+    """Handle approval/rejection via Slack reactions on #review messages."""
+    reaction = event.get("reaction", "")
+    item = event.get("item", {})
+    message_ts = item.get("ts")
+    channel = item.get("channel")
+
+    if not message_ts:
+        return
+
+    task = TaskManager.find_by_review_ts(message_ts)
+    if not task:
+        return
+
+    task_id = task["task_id"]
+    agent_config = AGENTS.get(task["agent_key"], {})
+    agent_client = AGENT_CLIENTS.get(task["agent_key"])
+
+    if reaction == "white_check_mark":  # ✅
+        TaskManager.update(task_id, status="approved")
+        print(f"✅ Task {task_id} approved")
+        if agent_client:
+            agent_client.chat_postMessage(
+                channel=CHANNELS["REVIEW"],
+                text=f"✅ *Task {task_id}* approved by Ethan.",
+                thread_ts=message_ts
+            )
+
+    elif reaction == "x":  # ❌
+        TaskManager.update(task_id, status="rejected")
+        print(f"❌ Task {task_id} rejected")
+        if agent_client:
+            agent_client.chat_postMessage(
+                channel=CHANNELS["REVIEW"],
+                text=f"❌ *Task {task_id}* rejected.",
+                thread_ts=message_ts
+            )
+
+    elif reaction == "arrows_counterclockwise":  # 🔄
+        rework_count = task.get("rework_count", 0)
+        if rework_count >= 3:
+            print(f"⚠️ Task {task_id} hit max rework limit (3)")
+            if agent_client:
+                agent_client.chat_postMessage(
+                    channel=CHANNELS["REVIEW"],
+                    text=f"⚠️ *Task {task_id}* has reached the maximum rework limit (3 attempts). Manual intervention needed.",
+                    thread_ts=message_ts
+                )
+            return
+
+        TaskManager.update(task_id, status="pending",
+                          rework_count=rework_count + 1)
+        print(f"🔄 Task {task_id} queued for rework (attempt {rework_count + 2})")
+        if agent_client:
+            agent_client.chat_postMessage(
+                channel=CHANNELS["REVIEW"],
+                text=f"🔄 *Task {task_id}* queued for rework (attempt {rework_count + 2}/4).",
+                thread_ts=message_ts
+            )
+        # Dispatch rework
+        dispatch_task(task_id)
 
 def join_channels():
     print("\nâï¸ Starting Automated Channel Joining...")
@@ -710,7 +967,8 @@ def join_channels():
 
     # Define required channels per agent
     JOIN_MAP = {
-        "CHIEF_OF_STAFF": [CHANNELS["MAIN"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
+        "CHIEF_OF_STAFF": [CHANNELS["MAIN"], CHANNELS["REVIEW"], CHANNELS["LOGS"],
+                           CHANNELS["RESEARCH"], CHANNELS["DEV"], CHANNELS["CONTENT"], CHANNELS["DESIGN"]],
         "RESEARCH_LEAD": [CHANNELS["RESEARCH"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
         "DEV_LEAD": [CHANNELS["DEV"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
         "CONTENT_LEAD": [CHANNELS["CONTENT"], CHANNELS["REVIEW"], CHANNELS["LOGS"]],
@@ -734,112 +992,152 @@ def join_channels():
     print("â Startup joining routine complete.\n")
 
 def daily_morning_briefing():
+    """Create and dispatch a tracked task for the morning briefing."""
     print("⏰ Executing Daily Morning Briefing (Research Lead)...")
     try:
-        agent_config = AGENTS["RESEARCH_LEAD"]
-        client = AGENT_CLIENTS["RESEARCH_LEAD"]
-        
-        prompt = "Ethan의 CIO 역할을 돕기 위해 오늘 아침 한국 AI 스타트업 동향과 주요 뉴스를 요약해서 브리핑해줘. 결과는 #review 채널에 어울리는 형식으로."
-        
-        res = claude.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            system=agent_config["system_prompt"],
-            messages=[{"role": "user", "content": prompt}]
+        task_id = TaskManager.create(
+            agent_key="RESEARCH_LEAD",
+            description="Ethan의 CIO 역할을 돕기 위해 오늘 아침 한국 AI 스타트업 동향과 주요 뉴스를 요약해서 브리핑해줘. 결과는 #review 채널에 어울리는 형식으로.",
+            source="scheduled:daily_briefing",
+            channel_id=CHANNELS["REVIEW"],
+            priority="P0"
         )
-        
-        reply = extract_text(res.content)
-        if not reply.strip():
-            reply = "No specific updates for this morning."
-        client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"🌅 *Daily Morning Briefing (Research Lead)*\n\n{reply}")
+        dispatch_task(task_id)
     except Exception as e:
         alert_error("RESEARCH_LEAD", f"Daily Briefing failed: {e}")
 
 WEEKLY_PLANNING_PROMPT = (
     "You are the Chief of Staff for Ethan's AI team at TheVentures. "
     "Generate a weekly task plan for the team. Assign concrete, actionable tasks to each agent:\n"
-    "- Research Lead: deal sourcing, market scans, LP intelligence\n"
-    "- Dev Lead: GitHub automations, code improvements, infra\n"
-    "- Content Lead: LinkedIn posts, newsletter drafts, GEO optimization\n"
-    "- Design Lead: deck specs, wireframes, visual assets\n\n"
-    "Format as a structured weekly plan with priorities (P0/P1/P2) per agent. "
-    "Be specific — reference real recurring workflows like founder radar, morning briefings, and content pipeline."
+    "- RESEARCH_LEAD: deal sourcing, market scans, LP intelligence\n"
+    "- DEV_LEAD: GitHub automations, code improvements, infra\n"
+    "- CONTENT_LEAD: LinkedIn posts, newsletter drafts, GEO optimization\n"
+    "- DESIGN_LEAD: deck specs, wireframes, visual assets\n\n"
+    "IMPORTANT: You MUST return ONLY a valid JSON array. No markdown, no explanation.\n"
+    "Each task object must have: agent_key, description, priority (P0/P1/P2).\n"
+    "Example:\n"
+    '[{"agent_key": "RESEARCH_LEAD", "description": "Scan Korean AI startups that raised this week", "priority": "P0"},'
+    ' {"agent_key": "DEV_LEAD", "description": "Review and improve SlackOS error handling", "priority": "P1"}]\n\n'
+    "Generate 4-8 tasks total. Be specific — reference real recurring workflows."
 )
 
 def weekly_task_coordination():
+    """Generate weekly plan as structured tasks and dispatch them."""
     print("⏰ Executing Weekly Task Coordination (Chief of Staff)...")
     try:
         client = AGENT_CLIENTS["CHIEF_OF_STAFF"]
 
-        prompt = "이번 주 Ethan을 위해 우리 AI 팀이 집중해야 할 주간 태스크를 생성하고 각 전문 에이전트(Dev, Research, Content, Design)에게 배분해줘. 결과는 주간 계획표 형식으로."
+        prompt = "이번 주 Ethan을 위해 AI 팀 주간 태스크를 JSON 배열로 생성해줘. 각 에이전트에게 구체적이고 실행 가능한 태스크를 배분해."
 
         res = claude.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1500,
+            max_tokens=2000,
             system=WEEKLY_PLANNING_PROMPT,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        reply = extract_text(res.content)
-        if not reply.strip():
-            reply = "No coordination tasks defined for this week."
-        client.chat_postMessage(channel=CHANNELS["REVIEW"], text=f"📅 [v{VERSION}] *Weekly Team Coordination*\n\n{reply}")
+        reply_text = extract_text(res.content)
+
+        # Parse JSON array from response
+        tasks_dispatched = []
+        try:
+            # Extract JSON array (handle potential markdown wrapping)
+            json_str = reply_text
+            if "```" in json_str:
+                json_str = re.search(r'\[.*\]', json_str, re.DOTALL)
+                json_str = json_str.group(0) if json_str else reply_text
+            elif "[" in json_str:
+                start = json_str.index("[")
+                end = json_str.rindex("]") + 1
+                json_str = json_str[start:end]
+
+            task_list = json.loads(json_str)
+
+            for t in task_list:
+                agent_key = t.get("agent_key", "").upper()
+                if agent_key not in AGENTS or agent_key == "CHIEF_OF_STAFF":
+                    continue
+                task_id = TaskManager.create(
+                    agent_key=agent_key,
+                    description=t.get("description", "Weekly task"),
+                    source="scheduled:weekly_plan",
+                    channel_id=CHANNELS["REVIEW"],
+                    priority=t.get("priority", "P1")
+                )
+                tasks_dispatched.append({"task_id": task_id, "agent": agent_key, "desc": t.get("description", "")[:80]})
+
+            # Dispatch all created tasks
+            for td in tasks_dispatched:
+                try:
+                    dispatch_task(td["task_id"])
+                except Exception as dispatch_err:
+                    print(f"❌ Failed to dispatch {td['task_id']}: {dispatch_err}")
+
+        except (json.JSONDecodeError, ValueError) as parse_err:
+            print(f"⚠️ Weekly plan JSON parse failed: {parse_err}. Posting as text.")
+            tasks_dispatched = []
+
+        # Summary to #review
+        if tasks_dispatched:
+            summary_lines = [f"- *{td['agent']}*: {td['desc']} (`{td['task_id']}`)" for td in tasks_dispatched]
+            summary = "\n".join(summary_lines)
+            client.chat_postMessage(
+                channel=CHANNELS["REVIEW"],
+                text=f"📅 [v{VERSION}] *Weekly Team Coordination*\n\n{len(tasks_dispatched)} tasks dispatched:\n{summary}"
+            )
+        else:
+            client.chat_postMessage(
+                channel=CHANNELS["REVIEW"],
+                text=f"📅 [v{VERSION}] *Weekly Team Coordination*\n\n{reply_text}"
+            )
+
     except Exception as e:
         alert_error("CHIEF_OF_STAFF", f"Weekly Coordination failed: {e}")
 
 def founder_radar():
-    """Scan for Korean-diaspora founders in recent YC batches and notable accelerators."""
+    """Create and dispatch a tracked task for founder radar scanning."""
     print("⏰ Executing Founder Radar (Research Lead)...")
     try:
-        client = AGENT_CLIENTS["RESEARCH_LEAD"]
-        agent_config = AGENTS["RESEARCH_LEAD"]
-
-        prompt = (
-            "Search for recently funded Korean and Korean-diaspora founders. Focus on:\n"
-            "1. Recent Y Combinator batches (last 6 months)\n"
-            "2. Notable Korean-founded startups that raised seed or Series A\n"
-            "3. Korean AI/tech founders in the US, Europe, or Southeast Asia\n\n"
-            "For each founder found, provide:\n"
-            "- Name, company, one-line description\n"
-            "- Funding stage and amount (if available)\n"
-            "- Why they're relevant to TheVentures\n"
-            "- Confidence score (High/Medium/Low) based on data quality\n\n"
-            "Format as a structured briefing. Only include founders with real, verifiable data."
+        task_id = TaskManager.create(
+            agent_key="RESEARCH_LEAD",
+            description=(
+                "Search for recently funded Korean and Korean-diaspora founders. Focus on:\n"
+                "1. Recent Y Combinator batches (last 6 months)\n"
+                "2. Notable Korean-founded startups that raised seed or Series A\n"
+                "3. Korean AI/tech founders in the US, Europe, or Southeast Asia\n\n"
+                "For each founder found, provide:\n"
+                "- Name, company, one-line description\n"
+                "- Funding stage and amount (if available)\n"
+                "- Why they're relevant to TheVentures\n"
+                "- Confidence score (High/Medium/Low) based on data quality\n\n"
+                "Format as a structured briefing. Only include founders with real, verifiable data."
+            ),
+            source="scheduled:founder_radar",
+            channel_id=CHANNELS["REVIEW"],
+            priority="P1"
         )
-
-        messages = [{"role": "user", "content": prompt}]
-
-        # Loop to handle pause_turn from server-side web search
-        while True:
-            res = claude.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=2048,
-                system=agent_config["system_prompt"],
-                tools=[WEB_SEARCH_TOOL],
-                messages=messages,
-                timeout=60.0
-            )
-
-            if res.stop_reason == "pause_turn":
-                messages.append({"role": "assistant", "content": res.content})
-                messages.append({"role": "user", "content": "Continue."})
-                continue
-            break
-
-        reply = extract_text(res.content)
-        if not reply.strip():
-            reply = "No founder radar results this cycle."
-        client.chat_postMessage(
-            channel=CHANNELS["REVIEW"],
-            text=f"🎯 *Founder Radar Briefing (Research Lead)*\n\n{reply}"
-        )
+        dispatch_task(task_id)
     except Exception as e:
         alert_error("RESEARCH_LEAD", f"Founder Radar failed: {e}")
+
+def process_pending_tasks():
+    """Process up to 3 pending tasks per cycle. Runs every 30 minutes."""
+    pending = TaskManager.get_pending()
+    if not pending:
+        return
+    print(f"⏰ Task queue: {len(pending)} pending tasks. Processing up to 3...")
+    for task in pending[:3]:
+        try:
+            dispatch_task(task["task_id"])
+        except Exception as e:
+            print(f"❌ Task queue failed for {task['task_id']}: {e}")
+
 
 scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
 scheduler.add_job(daily_morning_briefing, 'cron', hour=7, minute=0)
 scheduler.add_job(weekly_task_coordination, 'cron', day_of_week='mon', hour=8, minute=0)
-scheduler.add_job(founder_radar, 'interval', hours=12) 
+scheduler.add_job(founder_radar, 'interval', hours=12)
+scheduler.add_job(process_pending_tasks, 'interval', minutes=30)
 
 if __name__ == "__main__":
     join_channels()
