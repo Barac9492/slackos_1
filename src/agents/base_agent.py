@@ -26,7 +26,7 @@ class BaseAgent(ABC):
         try:
             logger.info(f"[{self.name}] Calling Anthropic API...")
             response = self.claude.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                            model="claude-3-5-sonnet-20250620",
                 max_tokens=2000,
                 system=self.get_system_prompt(),
                 messages=[{"role": "user", "content": message}]
