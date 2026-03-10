@@ -1,7 +1,10 @@
+import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import anthropic
 from ..config import Config
+
+logger = logging.getLogger(__name__)
 
 class BaseAgent(ABC):
     def __init__(self, name: str, emoji: str, channel: str):
@@ -9,31 +12,32 @@ class BaseAgent(ABC):
         self.emoji = emoji
         self.channel = channel
         self.claude = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        
+
     @abstractmethod
     def get_system_prompt(self) -> str:
         pass
-    
+
     @abstractmethod
     def should_respond(self, message: str, context: Dict[str, Any]) -> bool:
         pass
-    
-    async def generate_response(self, message: str, context: Dict[str, Any]) -> Optional[str]:
+
+    def generate_response_sync(self, message: str) -> Optional[str]:
+        """Synchronous response generation — called from ThreadPoolExecutor."""
         try:
-            if not self.should_respond(message, context):
-                return None
-                
+            logger.info(f"[{self.name}] Calling Anthropic API...")
             response = self.claude.messages.create(
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=2000,
                 system=self.get_system_prompt(),
                 messages=[{"role": "user", "content": message}]
             )
-            
-            return self._extract_text(response.content)
+            result = self._extract_text(response.content)
+            logger.info(f"[{self.name}] Got response ({len(result)} chars)")
+            return result
         except Exception as e:
-            return f"Error generating response: {str(e)}"
-    
+            logger.error(f"[{self.name}] Anthropic API error: {e}", exc_info=True)
+            raise
+
     def _extract_text(self, content) -> str:
         if isinstance(content, str):
             return content
